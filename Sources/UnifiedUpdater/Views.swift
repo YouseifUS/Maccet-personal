@@ -185,7 +185,7 @@ struct ContentView: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Update source setup").font(.headline)
-                Text("Maccet prepares enabled sources and their required tools when you open the app. macOS may ask for administrator permission. Application updates still require your review.")
+                Text("Maccet reads your applications first, then prepares enabled sources that may be needed. macOS may ask for administrator permission. Application updates still require your review.")
                     .font(.callout).foregroundStyle(.secondary)
                 ForEach(model.setupItems) { item in
                     HStack(alignment: .top, spacing: 12) {

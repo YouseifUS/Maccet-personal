@@ -1,6 +1,6 @@
 # Automatic source setup — 0.1.2
 
-The GUI prepares enabled sources and their required tools on every launch, once per app process, before an automatic application scan. Opening another window does not repeat setup. **Sources → Prepare Sources Again** requests a full run for the enabled sources; after a partial failure, **Retry Setup** retries unfinished preparation in the current session.
+The GUI reads the configured application inventory first, then prepares applicable enabled sources and their required tools, once per app process. An update-source check follows preparation. Opening another window does not repeat setup. **Sources → Prepare Sources Again** recomputes inventory needs and prepares the applicable enabled sources; after a partial failure, **Retry Setup** retries unfinished preparation in the current session.
 
 ## Startup sequence
 
@@ -12,6 +12,19 @@ as **Required for App Store** even when its own application source is disabled.
 If all sources are disabled, source steps show **Disabled**, developer tools
 show **Not needed**, and inventory continues without setup commands or
 authorization prompts. The sequence below runs only for required tools.
+
+When inventory completes without warnings, an empty or macOS-only inventory
+needs no source preparation. Store-receipt applications may need App Store;
+applications without receipts may need Homebrew or MacPorts. Store-only
+inventories prepare only the helper's package-manager route, and inventories
+without store-receipt applications skip mas. Package managers remain potential
+routes: this filtering does not prove ownership of a non-store application.
+
+Any inventory warning, or an API caller omitting inventory, keeps conservative
+enabled-source preparation because missing metadata cannot prove a source
+unnecessary. Warnings remain visible. Every preparation attempt, including
+retry, recomputes these needs; previously successful steps are reused only
+when still applicable. The later source check remains an independent step.
 
 1. Check Apple developer tools with `xcrun --find clang`. If missing, request Apple's installer using `xcode-select --install`. The system controls its download, license, and installation. Finish it and use **Retry Setup**; dependent work is paused until then.
 2. Find Homebrew under `/opt/homebrew/bin` or `/usr/local/bin`. When missing on Apple Silicon, download `Homebrew.pkg` from the latest official `Homebrew/brew` GitHub release, verify the release SHA-256 and Gatekeeper assessment, and install through macOS authorization. Run `brew update` as the logged-in user and check its version.
@@ -89,6 +102,34 @@ updated for compatibility; the original checkout was left untouched.
 This addresses enabled-source selection in Phase C. Deciding which enabled
 sources are useful to the discovered application inventory, fuller readiness
 reporting, and clean-machine acceptance remain open.
+
+## Inventory-based preparation validation — 16 October 2026
+
+Before this change, the controlled GUI regression failed because an empty
+inventory still triggered tool maintenance. After the fix,
+`bash scripts/test.sh` passes **90 core checks** and
+`bash scripts/test-setup-retry.sh` passes **8 orchestration checks**.
+Coverage includes complete empty and system-only inventories, non-store
+inventories, both store-helper manager routes, incomplete inventory, disabled
+sources, missing developer tools, and changed inventory between retries.
+The GUI test also checks that inventory is published before the first
+developer-tool command runs.
+
+The PR release build, packaging, local signature verification, and bundled
+startup-script syntax check pass. An isolated snapshot of the unpublished
+local UI passes **101 core checks**, **5 existing UI orchestration checks**,
+and **8 setup orchestration checks**. In that snapshot, the existing
+developer-tool failure assertion was adapted to expect mas to remain
+**Not needed** for its non-store fixtures, and the setup copy was updated.
+The original checkout was left untouched.
+
+A fresh read-only inventory found **112 apps** (34 third-party, 78 managed by
+macOS), with **0 warnings**. Environment: Apple Silicon arm64, macOS 27.0.1,
+Swift 6.4. No installed applications or source tools were maintained.
+
+This adds conservative applicability filtering for preparation. Exact package
+ownership checks, richer readiness reporting, and clean-machine acceptance
+remain separate requirements; preparation does not establish update coverage.
 
 ## References
 

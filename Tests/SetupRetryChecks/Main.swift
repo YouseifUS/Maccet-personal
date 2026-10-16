@@ -9,9 +9,10 @@ private final class SetupRunner: CommandRunning {
     var failPorts = true
     var actions: [String] = []
     var calls = 0
+    var beforeSetup: (@MainActor () throws -> Void)?
     func run(_ executable: String, _ arguments: [String], environment: [String: String], timeout: TimeInterval?) async throws -> CommandResult {
         calls += 1
-        if executable == "/usr/bin/xcrun" { return CommandResult(output: "/usr/bin/clang") }
+        if executable == "/usr/bin/xcrun" { try await beforeSetup?(); return CommandResult(output: "/usr/bin/clang") }
         if executable == "/bin/bash", arguments.count > 1 {
             let action = arguments[1]; actions.append(action)
             return CommandResult(status: action == "ports-update" && failPorts ? 1 : 0, errorOutput: "Controlled source failure")
@@ -45,15 +46,28 @@ private final class SetupRunner: CommandRunning {
             else { unsetenv("UNIFIED_UPDATER_DATA_DIR") }
         }
         do {
+            let applications = root.appendingPathComponent("Applications")
+            for name in ["Direct", "Store"] {
+                let contents = applications.appendingPathComponent(name + ".app/Contents")
+                try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+                let info = ["CFBundleIdentifier": "test.maccet.setup." + name, "CFBundleName": name, "CFBundleShortVersionString": "1.0", "CFBundleVersion": "1"]
+                try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: contents.appendingPathComponent("Info.plist"))
+                if name == "Store" {
+                    try FileManager.default.createDirectory(at: contents.appendingPathComponent("_MASReceipt"), withIntermediateDirectories: false)
+                    try Data().write(to: contents.appendingPathComponent("_MASReceipt/receipt"))
+                }
+            }
             let runner = SetupRunner()
             let paths = ["brew": "/opt/homebrew/bin/brew", "port": "/opt/local/bin/port", "mas": "/opt/homebrew/bin/mas"]
             func session() -> AppModel {
                 let model = AppModel(runner: runner, setupLocate: { paths[$0] })
-                model.preferences.scanRoots = []; model.preferences.includeSystemApplications = false
+                model.preferences.scanRoots = [applications.path]; model.preferences.includeSystemApplications = false
                 return model
             }
             let model = session()
+            runner.beforeSetup = { try expect(model.apps.count == 2, "Preparation ran before inventory was published") }
             model.start(); try await wait(model)
+            runner.beforeSetup = nil
             try expect(model.setupItems[1].phase == .ready && model.setupItems[2].phase == .failed && model.setupItems[3].phase == .ready, "Partial setup result was lost")
             print("PASS Partial source failure remains visible")
 
@@ -84,7 +98,27 @@ private final class SetupRunner: CommandRunning {
             try expect(runner.actions.count == actionsBefore + 1 && runner.actions.last == "brew-update", "Single-source settings were not passed to preparation")
             try expect(homebrewOnly.setupItems[2].phase == .disabled && homebrewOnly.setupItems[3].phase == .disabled && !homebrewOnly.setupNeedsAttention, "Disabled steps were presented as failures")
             print("PASS GUI setup prepares only the enabled source")
-            print("\n5 setup orchestration checks passed; 0 failed.")
+            let empty = session()
+            empty.preferences.scanRoots = []
+            let beforeEmpty = runner.actions.count
+            empty.start(); try await wait(empty)
+            try expect(runner.actions.count == beforeEmpty, "An empty inventory still triggered tool maintenance")
+            try expect(empty.setupItems.allSatisfy { $0.phase == .notRequired } && empty.lastScan != nil, "An empty inventory did not finish without setup")
+            print("PASS Empty inventories do not trigger source preparation")
+            let storeOnly = session()
+            storeOnly.preferences.scanRoots = [applications.appendingPathComponent("Store.app").path]
+            let beforeStore = runner.actions.count
+            storeOnly.start(); try await wait(storeOnly)
+            try expect(Array(runner.actions.dropFirst(beforeStore)) == ["brew-update", "mas-update"], "Store-only inventory prepared unrelated managers")
+            try expect(storeOnly.setupItems[1].dependencyFor == .appStore && storeOnly.setupItems[2].phase == .notRequired, "Store helper dependency was not distinguished")
+            print("PASS Store-only inventory prepares only its helper route")
+            let directOnly = session()
+            directOnly.preferences.scanRoots = [applications.appendingPathComponent("Direct.app").path]
+            let beforeDirect = runner.actions.count
+            directOnly.start(); try await wait(directOnly)
+            try expect(Array(runner.actions.dropFirst(beforeDirect)) == ["brew-update", "ports-update"] && directOnly.setupItems[3].phase == .notRequired, "Non-store inventory prepared mas")
+            print("PASS Non-store inventory skips the App Store helper")
+            print("\n8 setup orchestration checks passed; 0 failed.")
         } catch {
             FileHandle.standardError.write(Data("FAIL \(error)\n".utf8)); exit(1)
         }

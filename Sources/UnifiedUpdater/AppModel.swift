@@ -101,12 +101,16 @@ final class AppModel: ObservableObject {
     func prepareSources() {
         guard !busy else { return }
         let previousItems = setupNeedsAttention ? setupItems : nil
-        let disabledSources = preferences.disabledSources
+        let prefs = preferences
         settingUp = true; setupItems = previousItems ?? DependencySetup.initialItems
         apps = []; selected = []; lastScan = nil
-        status = "Preparing update sources…"
+        status = "Reading applications before source preparation…"
         Task { [self] in
-            setupItems = await DependencySetup(runner: runner, locate: setupLocate).prepare(disabledSources: disabledSources, retrying: previousItems) { [weak self] items in
+            let inventory = await Task.detached {
+                AppInventory().discover(roots: prefs.inventoryRoots, includeSystem: prefs.includeSystemApplications ?? true)
+            }.value
+            apps = inventory.apps; warnings = inventory.warnings
+            setupItems = await DependencySetup(runner: runner, locate: setupLocate).prepare(inventory: inventory, disabledSources: prefs.disabledSources, retrying: previousItems) { [weak self] items in
                 await MainActor.run {
                     self?.setupItems = items
                     if let active = items.first(where: { $0.phase == .running }) { self?.status = active.message }

@@ -673,6 +673,69 @@ private enum Checks {
             try expect(enabled.allSatisfy { $0.phase == .ready } && enabled[1].dependencyFor == nil)
             try expect(fixture.actions == ["brew-update", "ports-update", "mas-update", "ports-update"])
         }
+        await check("Complete empty and system-only inventories require no tool preparation") {
+            for systemOnly in [false, true] {
+                let fixture = try Fixture(); defer { fixture.clean() }
+                let setup = SetupFixture(); setup.paths = [:]; setup.toolsMissing = true
+                var inventory = AppInventory().discover(roots: [])
+                if systemOnly { var app = try fixture.app(); app.state = .systemManaged; inventory.apps = [app] }
+                let result = await setup.service().prepare(inventory: inventory)
+                try expect(result.allSatisfy { $0.phase == .notRequired } && setup.runner.calls.isEmpty)
+            }
+        }
+        await check("Complete non-store inventories do not install the App Store helper") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let setup = SetupFixture(); setup.paths.removeValue(forKey: "mas")
+            let result = await setup.service().prepare(inventory: AppInventory().discover(roots: [fixture.root.path]))
+            try expect(setup.actions == ["brew-update", "ports-update"] && result[3].phase == .notRequired)
+        }
+        await check("Store-only inventories prepare Homebrew only as the helper dependency") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            var inventory = AppInventory().discover(roots: [fixture.root.path]); inventory.apps[0].hasStoreReceipt = true
+            let setup = SetupFixture()
+            let result = await setup.service().prepare(inventory: inventory)
+            try expect(setup.actions == ["brew-update", "mas-update"])
+            try expect(result[1].dependencyFor == .appStore && result[2].phase == .notRequired && result[3].phase == .ready)
+        }
+        await check("Store-only inventories preserve the MacPorts-owned helper route") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            var inventory = AppInventory().discover(roots: [fixture.root.path]); inventory.apps[0].hasStoreReceipt = true
+            let setup = SetupFixture(); setup.paths["mas"] = "/opt/local/bin/mas"
+            let result = await setup.service().prepare(inventory: inventory)
+            try expect(setup.actions == ["ports-update", "ports-mas-update"])
+            try expect(result[1].phase == .notRequired && result[2].dependencyFor == .appStore)
+        }
+        await check("Incomplete inventory cannot prove any enabled source unnecessary") {
+            let setup = SetupFixture()
+            var inventory = AppInventory().discover(roots: []); inventory.warnings = ["A configured folder could not be read"]
+            let result = await setup.service().prepare(inventory: inventory)
+            try expect(result.allSatisfy { $0.phase == .ready })
+            try expect(setup.actions == ["brew-update", "ports-update", "mas-update"])
+        }
+        await check("Source disable settings take precedence over inventory applicability") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            var inventory = AppInventory().discover(roots: [fixture.root.path]); inventory.apps[0].hasStoreReceipt = true
+            let setup = SetupFixture()
+            let result = await setup.service().prepare(inventory: inventory, disabledSources: [.appStore])
+            try expect(setup.runner.calls.isEmpty && result[3].phase == .disabled)
+            try expect(result.prefix(3).allSatisfy { $0.phase == .notRequired })
+        }
+        await check("Retry recomputes inventory needs and clears obsolete dependency labels") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            var inventory = AppInventory().discover(roots: [fixture.root.path]); inventory.apps[0].hasStoreReceipt = true
+            let setup = SetupFixture()
+            let first = await setup.service().prepare(inventory: inventory)
+            inventory.apps[0].hasStoreReceipt = false
+            let second = await setup.service().prepare(inventory: inventory, retrying: first)
+            try expect(setup.actions == ["brew-update", "mas-update", "ports-update"])
+            try expect(second[1].phase == .ready && second[1].dependencyFor == nil && second[2].phase == .ready && second[3].phase == .notRequired)
+        }
+        await check("Missing developer tools do not turn an unnecessary helper into a failed step") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let setup = SetupFixture(); setup.toolsMissing = true
+            let result = await setup.service().prepare(inventory: AppInventory().discover(roots: [fixture.root.path]))
+            try expect(result[0].phase == .failed && result[1].phase == .failed && result[2].phase == .failed && result[3].phase == .notRequired)
+        }
         await check("Startup installs missing managers from verified official packages and then mas") {
             let fixture = SetupFixture(); fixture.paths = [:]; fixture.ownedMas = false
             let result = await fixture.service().prepare()

@@ -61,7 +61,7 @@ public struct DependencySetup {
         // Installer processes must finish; never kill a privileged installer on a timer.
         _ = try await command("/bin/bash", [Self.scriptURL.path] + arguments, timeout: nil)
     }
-    public func prepare(disabledSources: Set<UpdateSource> = [], retrying previousItems: [SetupItem]? = nil, progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
+    public func prepare(inventory: InventoryResult? = nil, disabledSources: Set<UpdateSource> = [], retrying previousItems: [SetupItem]? = nil, progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
         // Reuse successful preparation only for an explicit retry in this session.
         var items = Self.initialItems.map { initial in
             guard let ready = previousItems?.first(where: { $0.id == initial.id && $0.phase == .ready }),
@@ -74,17 +74,32 @@ public struct DependencySetup {
             items[index].phase = phase; items[index].message = Diagnostics.redact(message)
             await progress(items)
         }
-        let needsMas = !disabledSources.contains(.appStore)
+        // Missing metadata cannot prove a source unnecessary. Preserve the
+        // conservative enabled-source behavior for incomplete or absent inventory.
+        var applicableSources = Set(UpdateSource.allCases)
+        if let inventory, inventory.warnings.isEmpty {
+            let apps = inventory.apps.filter { $0.state != .systemManaged }
+            if !apps.contains(where: \.hasStoreReceipt) { applicableSources.remove(.appStore) }
+            if !apps.contains(where: { !$0.hasStoreReceipt }) {
+                applicableSources.remove(.homebrew); applicableSources.remove(.macPorts)
+            }
+        }
+        let requestedSources = applicableSources.subtracting(disabledSources)
+        func skip(_ index: Int, _ source: UpdateSource) async {
+            if disabledSources.contains(source) { await report(index, .disabled, "\(source.title) is disabled in Settings.") }
+            else { await report(index, .notRequired, "No discovered application requires this source.") }
+        }
+        let needsMas = requestedSources.contains(.appStore)
         let masUsesPorts = needsMas && locate("mas") == "/opt/local/bin/mas"
-        let needsBrew = !disabledSources.contains(.homebrew) || (needsMas && !masUsesPorts)
-        let needsPorts = !disabledSources.contains(.macPorts) || masUsesPorts
-        if !needsBrew { await report(1, .disabled, "Homebrew is disabled in Settings.") }
-        else if disabledSources.contains(.homebrew) { items[1].dependencyFor = .appStore }
-        if !needsPorts { await report(2, .disabled, "MacPorts is disabled in Settings.") }
-        else if disabledSources.contains(.macPorts) { items[2].dependencyFor = .appStore }
-        if !needsMas { await report(3, .disabled, "App Store is disabled in Settings.") }
+        let needsBrew = requestedSources.contains(.homebrew) || (needsMas && !masUsesPorts)
+        let needsPorts = requestedSources.contains(.macPorts) || masUsesPorts
+        if !needsBrew { await skip(1, .homebrew) }
+        else if !requestedSources.contains(.homebrew) { items[1].dependencyFor = .appStore }
+        if !needsPorts { await skip(2, .macPorts) }
+        else if !requestedSources.contains(.macPorts) { items[2].dependencyFor = .appStore }
+        if !needsMas { await skip(3, .appStore) }
         guard needsBrew || needsPorts else {
-            await report(0, .notRequired, "No enabled source requires developer tools.")
+            await report(0, .notRequired, "No source requires developer tools for this inventory.")
             return items
         }
         await report(0, .running, "Checking Apple developer tools…")
@@ -95,7 +110,7 @@ public struct DependencySetup {
             // Apple owns the download, license, and installation UI.
             _ = try? await command("/usr/bin/xcode-select", ["--install"], timeout: 20)
             await report(0, .failed, "Complete Apple's developer tools installer, then choose Retry Setup.")
-            for index in 1..<items.count where items[index].phase != .disabled {
+            for index in 1..<items.count where items[index].phase != .disabled && items[index].phase != .notRequired {
                 await report(index, .failed, "Waiting for Apple developer tools. Retry Setup after installation.")
             }
             return items

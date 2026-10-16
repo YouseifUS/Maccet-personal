@@ -10,12 +10,12 @@ private func expectThrows(_ action: () throws -> Void) throws {
     throw CheckFailure(description: "Expected operation to throw")
 }
 private final class FakeRunner: CommandRunning {
-    struct Call { var executable: String; var args: [String]; var environment: [String: String] }
+    struct Call { var executable: String; var args: [String]; var environment: [String: String]; var timeout: TimeInterval? }
     var calls: [Call] = []
     var handler: (Call) throws -> CommandResult
     init(handler: @escaping (Call) throws -> CommandResult) { self.handler = handler }
     func run(_ executable: String, _ arguments: [String], environment: [String: String], timeout: TimeInterval?) async throws -> CommandResult {
-        let call = Call(executable: executable, args: arguments, environment: environment)
+        let call = Call(executable: executable, args: arguments, environment: environment, timeout: timeout)
         calls.append(call); return try handler(call)
     }
 }
@@ -67,6 +67,7 @@ private final class SetupFixture {
     var cancelInstall = false
     var ownedMas = true
     var masVersion = "7.0.0"
+    var brokenTools: Set<String> = []
     let digest = String(repeating: "a", count: 64)
     lazy var runner = FakeRunner { [unowned self] call in
         if call.executable == "/usr/bin/xcrun" { return CommandResult(status: self.toolsMissing ? 1 : 0, output: "/Developer/usr/bin/clang") }
@@ -99,6 +100,9 @@ private final class SetupFixture {
             }
         }
         if call.args == ["list", "--formula", "--versions", "mas"] { return CommandResult(status: self.ownedMas ? 0 : 1, output: self.ownedMas ? "mas 7.0.0" : "") }
+        if self.brokenTools.contains(where: { self.paths[$0] == call.executable }), call.args == ["--version"] || call.args == ["version"] {
+            return CommandResult(status: 1, errorOutput: "Tool cannot start")
+        }
         if call.executable == self.paths["brew"], call.args == ["--version"] { return CommandResult(output: "Homebrew 7.0.9") }
         if call.executable == self.paths["port"], call.args == ["version"] { return CommandResult(output: "Version: 2.12.7") }
         if call.executable == self.paths["mas"], call.args == ["version"] { return CommandResult(output: self.masVersion) }
@@ -868,6 +872,83 @@ private enum Checks {
             let retried = await fixture.service().prepare(retrying: first)
             try expect(retried.allSatisfy { $0.phase == .ready })
             try expect(fixture.actions == ["brew-update", "ports-update", "brew-update", "install-package", "ports-update", "mas-update"])
+        }
+        await check("A ready Homebrew at a different location is prepared again on retry") {
+            let fixture = SetupFixture(); fixture.failPorts = true
+            let first = await fixture.service().prepare()
+            fixture.failPorts = false; fixture.paths["brew"] = "/usr/local/bin/brew"
+            let retried = await fixture.service().prepare(retrying: first)
+            try expect(retried.allSatisfy { $0.phase == .ready })
+            try expect(fixture.actions == ["brew-update", "ports-update", "mas-update", "brew-update", "ports-update"], "A changed tool inherited preparation from its previous location")
+        }
+        await check("A previously ready mas downgraded below the supported version fails on retry") {
+            let fixture = SetupFixture(); fixture.failPorts = true
+            let first = await fixture.service().prepare()
+            fixture.failPorts = false; fixture.masVersion = "6.0.0"
+            let retried = await fixture.service().prepare(retrying: first)
+            try expect(retried[3].phase == .failed && retried[3].message.contains("mas 7 or later"), "An incompatible helper retained its old ready result")
+            try expect(fixture.actions == ["brew-update", "ports-update", "mas-update", "ports-update", "mas-update"])
+        }
+        await check("A previously ready manager that no longer runs fails on retry") {
+            let fixture = SetupFixture(); fixture.failBrew = true
+            let first = await fixture.service().prepare()
+            fixture.failBrew = false; fixture.brokenTools = ["port"]
+            let retried = await fixture.service().prepare(retrying: first)
+            try expect(retried[2].phase == .failed && retried[2].message.contains("Tool cannot start"), "A broken executable retained its old ready result")
+            try expect(retried[1].phase == .ready && retried[3].phase == .ready)
+        }
+        await check("A healthy ready helper is reprobed without maintenance and publishes its current version") {
+            let fixture = SetupFixture(); fixture.failPorts = true
+            let first = await fixture.service().prepare()
+            try expect(first[1].executablePath == ToolLocator.canonicalPath(fixture.paths["brew"]!) && first[1].version == "Homebrew 7.0.9")
+            let callCount = fixture.runner.calls.count
+            fixture.failPorts = false; fixture.masVersion = "7.1.0"
+            let retried = await fixture.service().prepare(retrying: first)
+            try expect(retried[3].version == "7.1.0" && retried[3].message == "mas 7.1.0")
+            let probes = fixture.runner.calls.dropFirst(callCount).filter { $0.executable == fixture.paths["brew"] && $0.args == ["--version"] || $0.executable == fixture.paths["mas"] && $0.args == ["version"] }
+            try expect(probes.count == 2 && probes.allSatisfy { $0.timeout == 20 })
+            try expect(fixture.actions == ["brew-update", "ports-update", "mas-update", "ports-update"])
+        }
+        await check("Changing a ready tool's symlink target invalidates its preparation") {
+            let fixture = SetupFixture(); fixture.failPorts = true
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("setup-link-" + UUID().uuidString)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let link = root.appendingPathComponent("brew")
+            for name in ["first", "second"] { try Data().write(to: root.appendingPathComponent(name)) }
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: root.appendingPathComponent("first"))
+            fixture.paths["brew"] = link.path
+            let first = await fixture.service().prepare()
+            try FileManager.default.removeItem(at: link)
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: root.appendingPathComponent("second"))
+            fixture.failPorts = false
+            let retried = await fixture.service().prepare(retrying: first)
+            try expect(retried[1].executablePath == ToolLocator.canonicalPath(root.appendingPathComponent("second").path))
+            try expect(fixture.actions == ["brew-update", "ports-update", "mas-update", "brew-update", "ports-update"])
+        }
+        await check("A canonical path alias preserves successful preparation") {
+            let fixture = SetupFixture(); fixture.failPorts = true
+            let first = await fixture.service().prepare()
+            fixture.failPorts = false; fixture.paths["brew"] = "/System/Volumes/Data/opt/homebrew/bin/brew"
+            let retried = await fixture.service().prepare(retrying: first)
+            try expect(retried.allSatisfy { $0.phase == .ready })
+            try expect(fixture.actions == ["brew-update", "ports-update", "mas-update", "ports-update"])
+        }
+        await check("Ready tools disabled before retry run no probes or maintenance") {
+            let fixture = SetupFixture()
+            let first = await fixture.service().prepare()
+            let callCount = fixture.runner.calls.count
+            let retried = await fixture.service().prepare(disabledSources: Set(UpdateSource.allCases), retrying: first)
+            try expect(retried[0].phase == .notRequired && retried.dropFirst().allSatisfy { $0.phase == .disabled })
+            try expect(fixture.runner.calls.count == callCount)
+        }
+        await check("An empty version response invalidates a ready helper") {
+            let fixture = SetupFixture(); fixture.failPorts = true
+            let first = await fixture.service().prepare()
+            fixture.failPorts = false; fixture.masVersion = " \n"
+            let retried = await fixture.service().prepare(retrying: first)
+            try expect(retried[3].phase == .failed && retried[3].message.contains("did not report a version"))
+            try expect(retried[3].version == nil && retried[3].executablePath == nil)
         }
         await check("Retry preserves a ready MacPorts-owned mas while fixing Homebrew") {
             let fixture = SetupFixture(); fixture.failBrew = true; fixture.paths["mas"] = "/opt/local/bin/mas"

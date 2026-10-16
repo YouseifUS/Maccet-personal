@@ -20,6 +20,8 @@ public struct SetupItem: Identifiable {
     public var phase: SetupPhase = .waiting
     public var message: String = "Waiting"
     public var dependencyFor: UpdateSource? = nil
+    public var executablePath: String? = nil
+    public var version: String? = nil
     public init(id: String, title: String) { self.id = id; self.title = title }
 }
 
@@ -61,11 +63,25 @@ public struct DependencySetup {
         // Installer processes must finish; never kill a privileged installer on a timer.
         _ = try await command("/bin/bash", [Self.scriptURL.path] + arguments, timeout: nil)
     }
+    private func probeVersion(_ executable: String, tool: String) async throws -> String {
+        let version = try await command(executable, tool == "brew" ? ["--version"] : ["version"], timeout: 20)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !version.isEmpty else { throw UpdaterError("\(tool) did not report a version.") }
+        if tool == "mas" {
+            guard let major = Int(version.split(separator: ".").first ?? ""), major >= 7 else {
+                throw UpdaterError("mas 7 or later is required. The installed helper reported: " + version)
+            }
+        }
+        return version
+    }
     public func prepare(inventory: InventoryResult? = nil, disabledSources: Set<UpdateSource> = [], retrying previousItems: [SetupItem]? = nil, progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
         // Reuse successful preparation only for an explicit retry in this session.
         var items = Self.initialItems.map { initial in
-            guard let ready = previousItems?.first(where: { $0.id == initial.id && $0.phase == .ready }),
-                  initial.id == "tools" || locate(initial.id) != nil else { return initial }
+            guard let ready = previousItems?.first(where: { $0.id == initial.id && $0.phase == .ready }) else { return initial }
+            if initial.id != "tools" {
+                guard let path = ready.executablePath, let executable = locate(initial.id),
+                      ToolLocator.canonicalPath(executable) == path else { return initial }
+            }
             var reused = ready
             reused.dependencyFor = nil
             return reused
@@ -73,6 +89,16 @@ public struct DependencySetup {
         func report(_ index: Int, _ phase: SetupPhase, _ message: String) async {
             items[index].phase = phase; items[index].message = Diagnostics.redact(message)
             await progress(items)
+        }
+        func confirmReady(_ index: Int, executable: String) async throws {
+            let canonicalPath = ToolLocator.canonicalPath(executable)
+            let version = try await probeVersion(executable, tool: items[index].id)
+            guard locate(items[index].id).map(ToolLocator.canonicalPath) == canonicalPath else {
+                throw UpdaterError("The tool location changed during its readiness check. Retry Setup.")
+            }
+            items[index].executablePath = canonicalPath
+            items[index].version = Diagnostics.redact(version)
+            await report(index, .ready, items[index].id == "mas" ? "mas " + version : version)
         }
         // Missing metadata cannot prove a source unnecessary. Preserve the
         // conservative enabled-source behavior for incomplete or absent inventory.
@@ -86,6 +112,22 @@ public struct DependencySetup {
         let masUsesPorts = needsMas && locate("mas") == "/opt/local/bin/mas"
         let needsBrew = requestedSources.contains(.homebrew) || (needsMas && !masUsesPorts)
         let needsPorts = requestedSources.contains(.macPorts) || masUsesPorts
+        // Presence alone cannot validate a cached success. Probe only required
+        // tools; healthy results skip maintenance, stale results use normal repair.
+        // Finish these checks before publishing cached ready states in progress.
+        for (index, needed) in [(1, needsBrew), (2, needsPorts), (3, needsMas)] where needed && items[index].phase == .ready {
+            do {
+                guard let executable = locate(items[index].id) else { throw UpdaterError("Tool is no longer installed.") }
+                let version = try await probeVersion(executable, tool: items[index].id)
+                guard locate(items[index].id).map(ToolLocator.canonicalPath) == items[index].executablePath else {
+                    throw UpdaterError("Tool location changed.")
+                }
+                items[index].version = Diagnostics.redact(version)
+                items[index].message = Diagnostics.redact(items[index].id == "mas" ? "mas " + version : version)
+            } catch {
+                items[index] = Self.initialItems[index]
+            }
+        }
         if !needsBrew { await skip(1, .homebrew) }
         else if !requestedSources.contains(.homebrew) { items[1].dependencyFor = .appStore }
         if !needsPorts { await skip(2, .macPorts) }
@@ -120,9 +162,8 @@ public struct DependencySetup {
                 }
                 guard let executable = locate("brew") else { throw UpdaterError("Homebrew installation finished but brew was not found in a supported location.") }
                 try await script(["brew-update", executable])
-                let version = try await command(executable, ["--version"])
+                try await confirmReady(1, executable: executable)
                 brew = executable
-                await report(1, .ready, version.trimmingCharacters(in: .whitespacesAndNewlines))
             } catch { await report(1, .failed, error.localizedDescription) }
         }
 
@@ -132,8 +173,7 @@ public struct DependencySetup {
                 if locate("port") == nil { try await installPackage(repository: "macports/macports-base", tool: "port") }
                 guard let executable = locate("port") else { throw UpdaterError("MacPorts installation finished but /opt/local/bin/port was not found.") }
                 try await script(["ports-update"])
-                let version = try await command(executable, ["version"])
-                await report(2, .ready, version.trimmingCharacters(in: .whitespacesAndNewlines))
+                try await confirmReady(2, executable: executable)
             } catch { await report(2, .failed, error.localizedDescription) }
         }
 
@@ -151,11 +191,7 @@ public struct DependencySetup {
                     try await script([action, brew])
                 }
                 guard let executable = locate("mas") else { throw UpdaterError("mas could not be found after installation.") }
-                let version = try await command(executable, ["version"])
-                guard let major = Int(version.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: ".").first ?? ""), major >= 7 else {
-                    throw UpdaterError("mas 7 or later is required. The installed helper reported: " + version)
-                }
-                await report(3, .ready, "mas " + version.trimmingCharacters(in: .whitespacesAndNewlines))
+                try await confirmReady(3, executable: executable)
             } catch { await report(3, .failed, error.localizedDescription) }
         }
 

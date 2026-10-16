@@ -175,7 +175,16 @@ public struct UpdateEngine {
     public static func verify(before: AppRecord, after: AppRecord) -> Bool {
         guard before.bundleID == after.bundleID, before.path == after.path, before.hasStoreReceipt == after.hasStoreReceipt,
               before.version != after.version || before.build != after.build, let target = before.targetVersion else { return false }
-        return ReleaseComparison.satisfies(after, target: target)
+        // App Store and MacPorts targets are marketing versions. Only Homebrew
+        // catalog versions can also describe a build or a version/build pair.
+        let matchesTarget: Bool
+        switch before.source {
+        case .appStore, .macPorts:
+            matchesTarget = ReleaseComparison.compare(after.version, target) == .orderedSame
+        default:
+            matchesTarget = ReleaseComparison.satisfies(after, target: target)
+        }
+        return matchesTarget
             && (before.targetBuild.map { ReleaseComparison.compare(after.build, $0) == .orderedSame } ?? true)
     }
     public static func isRunning(_ app: AppRecord) async -> Bool {

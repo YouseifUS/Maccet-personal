@@ -242,6 +242,38 @@ private enum Checks {
             after.version = "2.0"; try expect(UpdateEngine.verify(before: before, after: after))
             after.bundleID = "wrong.bundle"; try expect(!UpdateEngine.verify(before: before, after: after))
         }
+        await check("App Store and MacPorts verification reject a build-only target match") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            for source in [UpdateSource.appStore, .macPorts] {
+                var before = try fixture.candidate(); before.source = source
+                before.hasStoreReceipt = source == .appStore
+                var after = before; after.build = "2.0"
+                try expect(!UpdateEngine.verify(before: before, after: after), "A changed build is not the reviewed marketing version for \(source.title)")
+                after.version = "1.5"
+                try expect(!UpdateEngine.verify(before: before, after: after), "A different marketing version is not the reviewed target for \(source.title)")
+            }
+        }
+        await check("App Store and MacPorts verification accept the reviewed marketing version") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            for source in [UpdateSource.appStore, .macPorts] {
+                var before = try fixture.candidate(); before.source = source
+                before.hasStoreReceipt = source == .appStore
+                var after = before; after.version = "2.0.0"
+                try expect(UpdateEngine.verify(before: before, after: after), "Normalized marketing versions should match for \(source.title)")
+                before.targetBuild = "20"
+                try expect(!UpdateEngine.verify(before: before, after: after))
+                after.build = "20"
+                try expect(UpdateEngine.verify(before: before, after: after))
+                after.bundleID = "wrong.bundle"
+                try expect(!UpdateEngine.verify(before: before, after: after))
+            }
+        }
+        await check("Homebrew verification retains build-only catalog targets") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            var before = try fixture.candidate(); before.targetVersion = "20"
+            var after = before; after.build = "20"
+            try expect(UpdateEngine.verify(before: before, after: after))
+        }
         await check("Combined release and build targets must both match") {
             let fixture = try Fixture(); defer { fixture.clean() }
             var before = try fixture.candidate(); before.targetVersion = "2.0,20"

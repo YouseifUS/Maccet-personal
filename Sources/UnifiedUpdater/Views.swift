@@ -12,7 +12,7 @@ struct ContentView: View {
         NavigationSplitView {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 10) {
-                    Image(systemName: "arrow.triangle.2.circlepath.circle.fill").font(.system(size: 31)).foregroundStyle(accent)
+                    Image(nsImage: NSApplication.shared.applicationIconImage).resizable().scaledToFit().frame(width: 38, height: 38)
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Unified Updater").font(.headline)
                         Text("A little less to keep up with.").font(.caption).foregroundStyle(.secondary)

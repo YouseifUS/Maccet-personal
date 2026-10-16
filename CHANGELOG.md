@@ -4,6 +4,7 @@
 
 ### Added
 
+- Maccet app icon: navy rounded M with an orange update indicator, bundled in all macOS icon sizes and used in the sidebar.
 - Automatic dependency preparation on every GUI launch: install missing Homebrew/MacPorts and install or update mas; refresh existing Homebrew and MacPorts before checking apps.
 - Bundled startup script, progress and failure results, Retry Setup, and protection against quitting during source installers.
 - Official GitHub release installer selection by OS, SHA-256 checks, Gatekeeper assessment, and macOS administrator authorization.

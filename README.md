@@ -1,5 +1,7 @@
 # Maccet — Personal Development
 
+<img src="assets/branding/maccet-icon.png" width="128" alt="Maccet app icon">
+
 **Your Mac updates, together.**
 
 This private development repository, `Maccet-personal`, contains the current **0.1.2 alpha** of Maccet. Development continues here ahead of a complete public release. Existing source target names, build artifacts, and local storage still use the original `UnifiedUpdater` name.

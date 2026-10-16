@@ -537,6 +537,79 @@ private enum Checks {
             let result = SourceResolver.resolve(storeApp, routes: [UpdateRoute(brew)!, UpdateRoute(storeApp)!], preferred: .homebrew)
             try expect(result.source == .appStore && result.routes?.count == 1)
         }
+        await check("An empty inventory performs no source checks or source failures") {
+            let runner = FakeRunner { _ in throw UpdaterError("No source should be called") }
+            var prefs = Preferences(); prefs.scanRoots = []; prefs.includeSystemApplications = false
+            let result = await ScanService(runner: runner, sourcePaths: [.homebrew: "/usr/bin/true", .macPorts: "/usr/bin/true", .appStore: "/usr/bin/true"]).scan(preferences: prefs)
+            try expect(runner.calls.isEmpty && result.sources.allSatisfy { $0.error == nil }, "Unnecessary source checks were reported as failures")
+            try expect(result.sources.allSatisfy { $0.checkRequired == false && !$0.needsAttention })
+        }
+        await check("Non-store inventory does not fail an unnecessary App Store check") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let runner = FakeRunner { _ in throw UpdaterError("No App Store check should be called") }
+            var prefs = Preferences(); prefs.scanRoots = [fixture.root.path]; prefs.includeSystemApplications = false; prefs.disabledSources = [.homebrew, .macPorts]
+            let result = await ScanService(runner: runner, sourcePaths: [.appStore: "/usr/bin/true"]).scan(preferences: prefs)
+            try expect(runner.calls.isEmpty && result.sources.first { $0.source == .appStore }?.error == nil, "An unnecessary App Store check produced a failure")
+            try expect(result.sources.first { $0.source == .appStore }?.checkRequired == false && result.checkedCount == 0 && result.apps[0].state == .unchecked)
+        }
+        await check("Missing tools for an empty inventory are unnecessary rather than failed") {
+            let runner = FakeRunner { _ in throw UpdaterError("No command expected") }
+            var prefs = Preferences(); prefs.scanRoots = []; prefs.includeSystemApplications = false
+            let result = await ScanService(runner: runner, sourcePaths: [:]).scan(preferences: prefs)
+            try expect(runner.calls.isEmpty && result.sources.allSatisfy { !$0.available && $0.checkRequired == false && !$0.needsAttention })
+        }
+        await check("Store-only source checks skip managers while preserving verified store results") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let receipt = fixture.appURL.appendingPathComponent("Contents/_MASReceipt")
+            try FileManager.default.createDirectory(at: receipt, withIntermediateDirectories: false)
+            try Data().write(to: receipt.appendingPathComponent("receipt"))
+            let app = try fixture.app()
+            let installed = String(decoding: try JSONSerialization.data(withJSONObject: ["adamID": 123456789, "bundleID": app.bundleID, "path": app.path]), as: UTF8.self)
+            let runner = FakeRunner { call in
+                guard call.executable == "/usr/bin/true" else { throw UpdaterError("An unrelated manager was checked") }
+                if call.args == ["version"] { return CommandResult(output: "7.0.0") }
+                if call.args == ["list", "--json"] { return CommandResult(output: installed) }
+                return CommandResult()
+            }
+            var prefs = Preferences(); prefs.scanRoots = [fixture.root.path]; prefs.includeSystemApplications = false
+            let result = await ScanService(runner: runner, sourcePaths: [.homebrew: "/usr/bin/false", .macPorts: "/bin/echo", .appStore: "/usr/bin/true"]).scan(preferences: prefs)
+            try expect(result.checkedCount == 1 && result.apps[0].state == .current)
+            try expect(runner.calls.count == 3 && runner.calls.allSatisfy { $0.executable == "/usr/bin/true" })
+            try expect(result.sources.filter { $0.source != .appStore }.allSatisfy { $0.available && $0.checkRequired == false && !$0.needsAttention })
+        }
+        await check("Required missing and failed sources still need attention") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            for present in [false, true] {
+                let runner = FakeRunner { _ in throw UpdaterError("Controlled source failure") }
+                var prefs = Preferences(); prefs.scanRoots = [fixture.root.path]; prefs.includeSystemApplications = false; prefs.disabledSources = [.macPorts, .appStore]
+                let result = await ScanService(runner: runner, sourcePaths: present ? [.homebrew: "/usr/bin/true"] : [:]).scan(preferences: prefs)
+                let health = result.sources.first { $0.source == .homebrew }!
+                try expect(health.checkRequired == true && health.needsAttention && result.checkedCount == 0)
+                try expect(health.available == present && (health.error != nil) == present)
+            }
+        }
+        await check("Inventory warnings keep source checks and failure attention conservative") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let runner = FakeRunner { _ in throw UpdaterError("Offline") }
+            var prefs = Preferences(); prefs.scanRoots = [fixture.root.appendingPathComponent("Missing").path]; prefs.includeSystemApplications = false
+            let result = await ScanService(runner: runner, sourcePaths: [.appStore: "/usr/bin/true"]).scan(preferences: prefs)
+            try expect(!result.warnings.isEmpty && runner.calls.count == 1)
+            try expect(result.sources.allSatisfy { $0.checkRequired == true && $0.needsAttention })
+        }
+        await check("Old source reports decode conservatively and skipped status round-trips") {
+            let data = Data(#"{"source":"macPorts","version":"","available":false,"message":"Not installed"}"#.utf8)
+            var health = try JSONDecoder().decode(SourceHealth.self, from: data)
+            try expect(health.checkRequired == nil && health.needsAttention)
+            health.checkRequired = false
+            let restored = try JSONDecoder().decode(SourceHealth.self, from: JSONEncoder().encode(health))
+            try expect(restored.checkRequired == false && !restored.needsAttention && !restored.available)
+        }
+        await check("Disabled source settings take precedence over skipped check status") {
+            let runner = FakeRunner { _ in throw UpdaterError("No command expected") }
+            var prefs = Preferences(); prefs.scanRoots = []; prefs.includeSystemApplications = false; prefs.disabledSources = Set(UpdateSource.allCases)
+            let result = await ScanService(runner: runner, sourcePaths: [.homebrew: "/usr/bin/true"]).scan(preferences: prefs)
+            try expect(runner.calls.isEmpty && result.sources.allSatisfy { $0.message == "Disabled in Settings." && $0.checkRequired == false && !$0.needsAttention })
+        }
         await check("A scan aggregates independent managers without overwriting candidates") {
             let fixture = try Fixture(); defer { fixture.clean() }
             let brew = try fixture.runner()

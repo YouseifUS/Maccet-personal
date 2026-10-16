@@ -12,17 +12,21 @@ public struct ScanService {
     public func scan(preferences: Preferences, onPartial: ((ScanResult) async -> Void)? = nil) async -> ScanResult {
         let inventory = await Task.detached { AppInventory().discover(roots: preferences.inventoryRoots, includeSystem: preferences.includeSystemApplications ?? true) }.value
         let updateInventory = inventory.apps.filter { $0.state != .systemManaged }
+        let applicableSources = inventory.applicableSources
         var result = ScanResult(apps: inventory.apps, sources: [], warnings: inventory.warnings)
         var routes: [String: [UpdateRoute]] = [:]
         await onPartial?(result)
         for source in UpdateSource.allCases {
             if preferences.disabledSources.contains(source) {
-                result.sources.append(SourceHealth(source: source, message: "Disabled in Settings.")); continue
+                result.sources.append(SourceHealth(source: source, executable: sourcePaths[source], available: sourcePaths[source] != nil, message: "Disabled in Settings.", checkRequired: false)); continue
+            }
+            if !applicableSources.contains(source) {
+                result.sources.append(SourceHealth(source: source, executable: sourcePaths[source], available: sourcePaths[source] != nil, message: "Not needed for this inventory. No update check was performed.", checkRequired: false)); continue
             }
             guard let executable = sourcePaths[source] else {
-                result.sources.append(SourceHealth(source: source, message: "\(source.title) not installed. Open Sources to inspect or retry automatic setup.")); continue
+                result.sources.append(SourceHealth(source: source, message: "\(source.title) not installed. Open Sources to inspect or retry automatic setup.", checkRequired: true)); continue
             }
-            var health = SourceHealth(source: source, executable: executable, available: true, message: "Available")
+            var health = SourceHealth(source: source, executable: executable, available: true, message: "Available", checkRequired: true)
             do {
                 health.version = String(try await runner.run(executable, source.versionArguments, environment: ["HOMEBREW_NO_AUTO_UPDATE": "1"], timeout: 15).checked().split(whereSeparator: \.isNewline).first ?? "")
                 let records: [AppRecord]

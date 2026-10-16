@@ -101,9 +101,12 @@ private final class SetupRunner: CommandRunning {
             let empty = session()
             empty.preferences.scanRoots = []
             let beforeEmpty = runner.actions.count
+            let callsBeforeEmpty = runner.calls
             empty.start(); try await wait(empty)
             try expect(runner.actions.count == beforeEmpty, "An empty inventory still triggered tool maintenance")
+            try expect(runner.calls == callsBeforeEmpty, "An empty inventory still triggered update-source checks")
             try expect(empty.setupItems.allSatisfy { $0.phase == .notRequired } && empty.lastScan != nil, "An empty inventory did not finish without setup")
+            try expect(empty.sources.allSatisfy { $0.checkRequired == false } && !empty.sourceChecksNeedAttention, "An unnecessary source appeared as missing or failed")
             print("PASS Empty inventories do not trigger source preparation")
             let storeOnly = session()
             storeOnly.preferences.scanRoots = [applications.appendingPathComponent("Store.app").path]
@@ -118,7 +121,11 @@ private final class SetupRunner: CommandRunning {
             directOnly.start(); try await wait(directOnly)
             try expect(Array(runner.actions.dropFirst(beforeDirect)) == ["brew-update", "ports-update"] && directOnly.setupItems[3].phase == .notRequired, "Non-store inventory prepared mas")
             print("PASS Non-store inventory skips the App Store helper")
-            print("\n8 setup orchestration checks passed; 0 failed.")
+            directOnly.sources = [SourceHealth(source: .appStore, message: "Not needed", checkRequired: false)]
+            directOnly.invalidateInventory()
+            try expect(directOnly.sources[0].checkRequired == nil && directOnly.sourceChecksNeedAttention && directOnly.lastScan == nil, "Changed scan settings retained a stale unnecessary-source decision")
+            print("PASS Changed scan settings invalidate skipped source checks")
+            print("\n9 setup orchestration checks passed; 0 failed.")
         } catch {
             FileHandle.standardError.write(Data("FAIL \(error)\n".utf8)); exit(1)
         }

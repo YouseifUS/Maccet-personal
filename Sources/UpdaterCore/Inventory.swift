@@ -3,6 +3,15 @@ import Foundation
 public struct InventoryResult {
     public var apps: [AppRecord]
     public var warnings: [String]
+    /// A warning prevents absence of readable metadata from excluding a source.
+    public var applicableSources: Set<UpdateSource> {
+        guard warnings.isEmpty else { return Set(UpdateSource.allCases) }
+        let thirdParty = apps.filter { $0.state != .systemManaged }
+        var sources = Set<UpdateSource>()
+        if thirdParty.contains(where: \.hasStoreReceipt) { sources.insert(.appStore) }
+        if thirdParty.contains(where: { !$0.hasStoreReceipt }) { sources.formUnion([.homebrew, .macPorts]) }
+        return sources
+    }
 }
 
 public struct AppInventory {

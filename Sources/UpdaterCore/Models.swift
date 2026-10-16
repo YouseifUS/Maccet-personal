@@ -69,9 +69,13 @@ public struct SourceHealth: Codable, Identifiable {
     public var available: Bool
     public var message: String
     public var error: String?
-    public init(source: UpdateSource, executable: String? = nil, version: String = "", available: Bool = false, message: String, error: String? = nil) {
+    // nil preserves the conservative meaning of reports written before this field.
+    public var checkRequired: Bool?
+    public var needsAttention: Bool { checkRequired != false && (!available || error != nil) }
+    public init(source: UpdateSource, executable: String? = nil, version: String = "", available: Bool = false, message: String, error: String? = nil, checkRequired: Bool? = nil) {
         self.source = source; self.executable = executable; self.version = version
         self.available = available; self.message = message; self.error = error
+        self.checkRequired = checkRequired
     }
 }
 

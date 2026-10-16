@@ -28,6 +28,9 @@ final class AppModel: ObservableObject {
     @Published var preferences = Preferences()
     @Published var history: [ActivityRecord] = []
     @Published var lastScan: Date?
+    @Published var settingUp = false
+    @Published var setupItems = DependencySetup.initialItems
+    private var startupStarted = false
     @Published var scanning = false
     @Published var preparing = false
     @Published var updating = false
@@ -44,7 +47,8 @@ final class AppModel: ObservableObject {
     let store: LocalStore
     let cacheRoot: URL
     let runner = ProcessRunner()
-    var busy: Bool { scanning || preparing || updating }
+    var busy: Bool { settingUp || scanning || preparing || updating }
+    var setupNeedsAttention: Bool { setupItems.contains { $0.phase == .failed } }
     var eligible: [AppRecord] { apps.filter(preferences.isEligible) }
     var checkedCount: Int { apps.filter { $0.state.isChecked }.count }
     var checkableCount: Int { apps.filter { $0.state != .systemManaged }.count }
@@ -82,6 +86,30 @@ final class AppModel: ObservableObject {
         sources = UpdateSource.allCases.map { source in
             let path = ToolLocator.find(source.toolName)
             return SourceHealth(source: source, executable: path, available: path != nil, message: path == nil ? "Not installed" : "Ready to check")
+        }
+    }
+
+    func start() {
+        guard !startupStarted else { return }
+        startupStarted = true
+        prepareSources()
+    }
+
+    func prepareSources() {
+        guard !busy else { return }
+        settingUp = true; setupItems = DependencySetup.initialItems
+        apps = []; selected = []; lastScan = nil
+        status = "Preparing update sources…"
+        Task { [self] in
+            setupItems = await DependencySetup(runner: runner).prepare { [weak self] items in
+                await MainActor.run {
+                    self?.setupItems = items
+                    if let active = items.first(where: { $0.phase == .running }) { self?.status = active.message }
+                }
+            }
+            settingUp = false
+            // A canceled authorization or offline source must not hide usable sources.
+            scan()
         }
     }
 

@@ -1,6 +1,6 @@
 # Release validation
 
-Current local alpha: **0.1.1**. The follow-up below records **49 passing checks** and the current multi-manager and inventory validation.
+Current local alpha: **0.1.2**. Startup dependency preparation is covered by **62 passing checks**, packaging validation, installer trust checks, and an isolated UI failure/retry exercise described below.
 
 ## 0.1.0 baseline
 
@@ -106,3 +106,18 @@ These limits are why 0.1.0 is labeled a **local alpha**. The scan and review pat
 - No real application update, package-manager installation, or global cleanup was performed during this follow-up.
 
 References: [MacPorts command manual](https://man.macports.org/port.1.html), [installed-file ownership](https://man.macports.org/port-provides.1.html).
+
+
+## 0.1.2 follow-up — startup source preparation
+
+Date: October 16, 2026. Same Apple Silicon / macOS 27.0.1 / Swift 6.4 validation environment as the baseline.
+
+- `bash scripts/test.sh`: **62 checks passed, 0 failed**. All 49 previous checks still pass.
+- Startup fixtures exercise installed-tool maintenance, all-missing installation, per-step progress, independent failure handling, missing Apple tools and the system installer handoff, canceled authorization, checksum mismatch, Gatekeeper rejection, repeated-launch maintenance, MacPorts-owned mas, old mas rejection, Intel initial-install limitations, and installer OS/URL/digest/uniqueness validation.
+- The actual bundled shell script passes syntax validation and rejects unknown actions, unsupported Homebrew executable paths, invalid installer hashes, and unexpected arguments without invoking installation.
+- The optimized arm64 app builds and its ad-hoc signature verifies. The ZIP passes integrity checks.
+- A copy of the packaged app in a separate folder passes `--check-startup-script`, proving the SwiftPM resource bundle travels with the app. Read-only `--inventory-json --folder /Applications` still discovers **33 apps** and bypasses launch setup.
+- Downloaded the current official Homebrew 7.0.9 package and MacPorts 2.12.7 package for macOS 27 without installing them. Their SHA-256 values match the official GitHub release asset digests. Both pass macOS Gatekeeper assessment as Notarized Developer ID installers; `pkgutil --check-signature` also confirms trusted installer signatures.
+- A separate signed QA copy uses an intentionally failing startup script, an unreachable network proxy, an isolated data directory, and disabled application source checks. Confirmed startup progress, disabled update controls during setup, failed-step explanations, the persistent setup-attention banner, **Sources → Retry Setup**, and the quit-protection dialog during preparation. No real source installer or maintenance command was run by that QA copy.
+
+No real Homebrew installation/update, MacPorts installation/selfupdate, mas upgrade, or privileged installer execution was performed. Those mutation paths are covered by controlled command fixtures and official installer trust checks, and still require clean-machine integration validation. Apple tool installation handoff, Intel/macOS 13–26 behavior, and actual authentication cancellation remain unverified on real installations. The unchanged broader release limitations above still apply.

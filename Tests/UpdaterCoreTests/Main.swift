@@ -57,6 +57,57 @@ private struct Fixture {
     }
 }
 
+private final class SetupFixture {
+    var paths = ["brew": "/opt/homebrew/bin/brew", "port": "/opt/local/bin/port", "mas": "/opt/homebrew/bin/mas"]
+    var toolsMissing = false
+    var failBrew = false
+    var badDigest = false
+    var rejectSignature = false
+    var cancelInstall = false
+    var ownedMas = true
+    var masVersion = "7.0.0"
+    let digest = String(repeating: "a", count: 64)
+    lazy var runner = FakeRunner { [unowned self] call in
+        if call.executable == "/usr/bin/xcrun" { return CommandResult(status: self.toolsMissing ? 1 : 0, output: "/Developer/usr/bin/clang") }
+        if call.executable == "/usr/bin/xcode-select" { return CommandResult() }
+        if call.executable == "/usr/bin/curl" {
+            if let index = call.args.firstIndex(of: "--output") {
+                try Data("fixture package".utf8).write(to: URL(fileURLWithPath: call.args[index + 1]))
+                return CommandResult()
+            }
+            let brew = call.args.last!.contains("Homebrew/brew")
+            let name = brew ? "Homebrew.pkg" : "MacPorts-2.12.7-27-GoldenGate.pkg"
+            let repository = brew ? "Homebrew/brew" : "macports/macports-base"
+            let value: [String: Any] = ["assets": [["name": name, "browser_download_url": "https://github.com/" + repository + "/releases/download/v1/" + name, "digest": "sha256:" + self.digest]]]
+            return CommandResult(output: String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self))
+        }
+        if call.executable == "/usr/bin/shasum" { return CommandResult(output: (self.badDigest ? String(repeating: "b", count: 64) : self.digest) + "  package.pkg") }
+        if call.executable == "/usr/sbin/spctl" { return CommandResult(status: self.rejectSignature ? 1 : 0, errorOutput: self.rejectSignature ? "Installer rejected" : "") }
+        if call.executable == "/bin/bash" {
+            switch call.args[1] {
+            case "brew-update": return CommandResult(status: self.failBrew ? 1 : 0, errorOutput: self.failBrew ? "Network unavailable" : "")
+            case "ports-update", "ports-mas-update": return CommandResult()
+            case "mas-install", "mas-update": self.paths["mas"] = "/opt/homebrew/bin/mas"; return CommandResult()
+            case "install-package":
+                if self.cancelInstall { return CommandResult(status: 1, errorOutput: "User canceled. (-128)") }
+                if call.args[2].hasSuffix("Homebrew.pkg") { self.paths["brew"] = "/opt/homebrew/bin/brew" }
+                else { self.paths["port"] = "/opt/local/bin/port" }
+                return CommandResult()
+            default: throw UpdaterError("Unexpected script action")
+            }
+        }
+        if call.args == ["list", "--formula", "--versions", "mas"] { return CommandResult(status: self.ownedMas ? 0 : 1, output: self.ownedMas ? "mas 7.0.0" : "") }
+        if call.executable == self.paths["brew"], call.args == ["--version"] { return CommandResult(output: "Homebrew 7.0.9") }
+        if call.executable == self.paths["port"], call.args == ["version"] { return CommandResult(output: "Version: 2.12.7") }
+        if call.executable == self.paths["mas"], call.args == ["version"] { return CommandResult(output: self.masVersion) }
+        throw UpdaterError("Unexpected setup command: " + call.executable + " " + call.args.joined(separator: " "))
+    }
+    func service(architecture: String = "arm64") -> DependencySetup {
+        DependencySetup(runner: runner, locate: { [unowned self] in self.paths[$0] }, osMajor: 27, architecture: architecture)
+    }
+    var actions: [String] { runner.calls.filter { $0.executable == "/bin/bash" }.map { $0.args[1] } }
+}
+
 @main
 private enum Checks {
     static func main() async {
@@ -476,6 +527,104 @@ private enum Checks {
         await check("Manager subprocesses can resolve standard MacPorts dependencies") {
             let result = try await ProcessRunner().run("/usr/bin/printenv", ["PATH"], environment: [:], timeout: 5)
             try expect(result.status == 0 && result.output.contains("/opt/local/bin"))
+        }
+        await check("Startup updates all three dependencies without upgrading applications") {
+            let fixture = SetupFixture()
+            var snapshots: [[SetupItem]] = []
+            let result = await fixture.service().prepare { snapshots.append($0) }
+            try expect(result.allSatisfy { $0.phase == .ready })
+            try expect(fixture.actions == ["brew-update", "ports-update", "mas-update"])
+            try expect(snapshots.contains { $0.contains { $0.phase == .running } })
+            try expect(fixture.runner.calls.allSatisfy { !$0.args.contains("outdated") && !$0.args.contains("--cask") })
+        }
+        await check("Startup installs missing managers from verified official packages and then mas") {
+            let fixture = SetupFixture(); fixture.paths = [:]; fixture.ownedMas = false
+            let result = await fixture.service().prepare()
+            try expect(result.allSatisfy { $0.phase == .ready })
+            try expect(fixture.actions == ["install-package", "brew-update", "install-package", "ports-update", "mas-install"])
+            let installers = fixture.runner.calls.filter { $0.executable == "/bin/bash" && $0.args[1] == "install-package" }
+            for installer in installers {
+                try expect(!FileManager.default.fileExists(atPath: installer.args[2]), "Temporary installer was not removed")
+                try expect(installer.args[3] == fixture.digest)
+            }
+        }
+        await check("Startup failures preserve independent sources and explain blocked mas") {
+            let fixture = SetupFixture(); fixture.failBrew = true
+            let result = await fixture.service().prepare()
+            try expect(result[1].phase == .failed && result[2].phase == .ready && result[3].phase == .failed)
+            try expect(fixture.actions == ["brew-update", "ports-update"])
+        }
+        await check("Missing Apple tools launch Apple's installer and block dependent work") {
+            let fixture = SetupFixture(); fixture.toolsMissing = true
+            let result = await fixture.service().prepare()
+            try expect(result.allSatisfy { $0.phase == .failed })
+            try expect(fixture.runner.calls.contains { $0.executable == "/usr/bin/xcode-select" && $0.args == ["--install"] })
+            try expect(fixture.actions.isEmpty && !fixture.runner.calls.contains { $0.executable == "/usr/bin/curl" })
+        }
+        await check("A mismatched package checksum blocks installation") {
+            let fixture = SetupFixture(); fixture.paths.removeValue(forKey: "port"); fixture.badDigest = true
+            let result = await fixture.service().prepare()
+            try expect(result[2].phase == .failed && result[2].message.contains("checksum"))
+            try expect(!fixture.actions.contains("install-package"))
+        }
+        await check("Gatekeeper rejection blocks package installation") {
+            let fixture = SetupFixture(); fixture.paths.removeValue(forKey: "port"); fixture.rejectSignature = true
+            let result = await fixture.service().prepare()
+            try expect(result[2].phase == .failed && !fixture.actions.contains("install-package"))
+        }
+        await check("Canceled installation is not reported ready and other sources finish") {
+            let fixture = SetupFixture(); fixture.paths.removeValue(forKey: "port"); fixture.cancelInstall = true
+            let result = await fixture.service().prepare()
+            try expect(result[2].phase == .failed && result[3].phase == .ready)
+            try expect(!fixture.actions.contains("ports-update"))
+        }
+        await check("Repeated preparation refreshes sources on each launch without reinstalling") {
+            let fixture = SetupFixture()
+            _ = await fixture.service().prepare(); _ = await fixture.service().prepare()
+            try expect(fixture.actions == ["brew-update", "ports-update", "mas-update", "brew-update", "ports-update", "mas-update"])
+        }
+        await check("MacPorts-owned mas stays with MacPorts") {
+            let fixture = SetupFixture(); fixture.paths["mas"] = "/opt/local/bin/mas"
+            let result = await fixture.service().prepare()
+            try expect(result.allSatisfy { $0.phase == .ready })
+            try expect(fixture.actions == ["brew-update", "ports-update", "ports-mas-update"])
+        }
+        await check("Incompatible mas is not marked ready") {
+            let fixture = SetupFixture(); fixture.masVersion = "6.0.0"
+            let result = await fixture.service().prepare()
+            try expect(result[3].phase == .failed && result[3].message.contains("7 or later"))
+        }
+        await check("Intel missing Homebrew reports its installer limitation without blocking MacPorts") {
+            let fixture = SetupFixture(); fixture.paths.removeValue(forKey: "brew")
+            let result = await fixture.service(architecture: "x86_64").prepare()
+            try expect(result[1].phase == .failed && result[2].phase == .ready)
+            try expect(!fixture.actions.contains("install-package"))
+        }
+        await check("Official installer selection rejects wrong OS, foreign URLs, missing digests, and duplicate matches") {
+            let digest = "sha256:" + String(repeating: "a", count: 64)
+            func metadata(name: String, url: String, hash: String?, copies: Int = 1) throws -> Data {
+                var asset = ["name": name, "browser_download_url": url]
+                asset["digest"] = hash
+                return try JSONSerialization.data(withJSONObject: ["assets": Array(repeating: asset, count: copies)])
+            }
+            let name = "MacPorts-2.12.7-27-GoldenGate.pkg"
+            let url = "https://github.com/macports/macports-base/releases/download/v2.12.7/" + name
+            let valid = try metadata(name: name, url: url, hash: digest)
+            try expect(try DependencySetup.selectInstaller(valid, repository: "macports/macports-base", tool: "port", osMajor: 27).name == name)
+            try expectThrows { _ = try DependencySetup.selectInstaller(valid, repository: "macports/macports-base", tool: "port", osMajor: 26) }
+            for data in [try metadata(name: name, url: "https://example.com/" + name, hash: digest), try metadata(name: name, url: url, hash: nil), try metadata(name: name, url: url, hash: digest, copies: 2)] {
+                try expectThrows { _ = try DependencySetup.selectInstaller(data, repository: "macports/macports-base", tool: "port", osMajor: 27) }
+            }
+        }
+        await check("Bundled startup script has valid shell syntax and rejects untrusted operations") {
+            let path = DependencySetup.scriptURL.path
+            let runner = ProcessRunner()
+            let syntax = try await runner.run("/bin/bash", ["-n", path], environment: [:], timeout: 5)
+            try expect(syntax.status == 0)
+            for arguments in [["unknown"], ["brew-update", "/tmp/untrusted-brew"], ["install-package", "/tmp/installer.pkg", "bad-hash"], ["ports-update", "extra"]] {
+                let result = try await runner.run("/bin/bash", [path] + arguments, environment: [:], timeout: 5)
+                try expect(result.status != 0)
+            }
         }
         print("\n\(passed) passed; \(failures.count) failed.")
         if !failures.isEmpty { exit(1) }

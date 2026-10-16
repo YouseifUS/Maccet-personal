@@ -9,7 +9,7 @@ let package = Package(
         .library(name: "UpdaterCore", targets: ["UpdaterCore"])
     ],
     targets: [
-        .target(name: "UpdaterCore"),
+        .target(name: "UpdaterCore", resources: [.process("Resources")]),
         .executableTarget(name: "UnifiedUpdater", dependencies: ["UpdaterCore"]),
         // The executable check suite also runs with Command Line Tools alone.
         .executableTarget(name: "UpdaterCoreChecks", dependencies: ["UpdaterCore"], path: "Tests/UpdaterCoreTests")

@@ -28,7 +28,7 @@ struct ContentView: View {
                 }.listStyle(.sidebar)
                 VStack(alignment: .leading, spacing: 8) {
                     Label("LOCAL FIRST", systemImage: "lock.shield").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-                    HStack { Text("Version 0.1.1"); Spacer(); Text("ALPHA").fontWeight(.semibold) }.font(.caption2).foregroundStyle(.tertiary)
+                    HStack { Text("Version 0.1.2"); Spacer(); Text("ALPHA").fontWeight(.semibold) }.font(.caption2).foregroundStyle(.tertiary)
                 }.padding(20)
             }.navigationSplitViewColumnWidth(min: 220, ideal: 235, max: 270)
         } detail: {
@@ -36,14 +36,26 @@ struct ContentView: View {
                 pageHeader
                 Divider()
                 Group {
-                    switch model.screen ?? .updates {
-                    case .updates, .installed, .appStore: inventoryPage
-                    case .activity: activityPage
-                    case .cleanup: cleanupPage
-                    case .sources: sourcesPage
-                    case .settings: settingsPage
+                    if model.settingUp {
+                        setupPage
+                    } else {
+                        switch model.screen ?? .updates {
+                        case .updates, .installed, .appStore: inventoryPage
+                        case .activity: activityPage
+                        case .cleanup: cleanupPage
+                        case .sources: sourcesPage
+                        case .settings: settingsPage
+                        }
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                if !model.settingUp && model.setupNeedsAttention {
+                    HStack {
+                        Label("Some update sources could not be prepared.", systemImage: "exclamationmark.circle")
+                        Spacer()
+                        Button("View Setup") { model.screen = .sources }
+                        Button("Retry Setup", action: model.prepareSources).disabled(model.busy)
+                    }.font(.callout).padding(14).background(Color.orange.opacity(0.08))
+                }
                 Divider()
                 HStack(spacing: 9) {
                     if model.busy { ProgressView().controlSize(.small) }
@@ -169,9 +181,42 @@ struct ContentView: View {
         if model.screen == .appStore { return "No App Store apps were identified in the scanned folders." }
         return "No available updates in this view. \(model.checkedCount) of \(model.apps.count) apps were checked. Review Installed Apps for unchecked applications."
     }
+    var setupResults: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Update source setup").font(.headline)
+                Text("Maccet installs missing sources and updates Homebrew, MacPorts, and mas every time you open the app. macOS may ask for administrator permission. Application updates still require your review.")
+                    .font(.callout).foregroundStyle(.secondary)
+                ForEach(model.setupItems) { item in
+                    HStack(alignment: .top, spacing: 12) {
+                        if item.phase == .running { ProgressView().controlSize(.small).frame(width: 20) }
+                        else { Image(systemName: item.phase == .ready ? "checkmark.circle.fill" : item.phase == .failed ? "exclamationmark.circle" : "circle")
+                            .foregroundStyle(item.phase == .failed ? Color.orange : item.phase == .ready ? accent : Color.secondary).frame(width: 20) }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.title).font(.callout.weight(.medium))
+                            Text(item.message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                if !model.settingUp {
+                    Button(model.setupNeedsAttention ? "Retry Setup" : "Prepare Sources Again", action: model.prepareSources).disabled(model.busy)
+                }
+            }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+    var setupPage: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Getting your update sources ready").font(.title2.weight(.semibold))
+                Text("Setup can take a few minutes. Keep Maccet open while installers finish.").foregroundStyle(.secondary)
+                setupResults
+            }.padding(26)
+        }
+    }
     var sourcesPage: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                setupResults
                 ForEach(model.sources) { source in
                     GroupBox {
                         VStack(alignment: .leading, spacing: 15) {
@@ -188,7 +233,7 @@ struct ContentView: View {
                             if let path = source.executable { Text(path).font(.caption.monospaced()).textSelection(.enabled) }
                             if let error = source.error { Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
                             HStack {
-                                Toggle("Enable this source", isOn: Binding(get: { !model.preferences.disabledSources.contains(source.source) }, set: { enabled in
+                                Toggle("Use this source for app checks", isOn: Binding(get: { !model.preferences.disabledSources.contains(source.source) }, set: { enabled in
                                     if enabled { model.preferences.disabledSources.remove(source.source) } else { model.preferences.disabledSources.insert(source.source) }
                                     model.savePreferences(); model.invalidateInventory()
                                 })).toggleStyle(.switch).disabled(model.busy)
@@ -199,7 +244,7 @@ struct ContentView: View {
                     }
                 }
                 Text("Each app appears once. When several installed managers claim it, choose one update route in the app's Details. A catalog match alone cannot take over an existing installation.").font(.callout).foregroundStyle(.secondary)
-                Label("Sparkle and vendor adapters are planned for a later release. No source is silently installed.", systemImage: "info.circle").font(.callout).foregroundStyle(.secondary)
+                Label("Source setup runs at launch. These switches control application checks; they do not disable source maintenance. Sparkle and vendor adapters are planned for a later release.", systemImage: "info.circle").font(.callout).foregroundStyle(.secondary)
             }.padding(26)
         }
     }
@@ -290,9 +335,9 @@ struct ContentView: View {
                 GroupBox {
                     VStack(alignment: .leading, spacing: 12) {
                         Label("Inventory and history stay on this Mac.", systemImage: "lock.shield")
-                        Label("Checks contact Homebrew and Apple's services.", systemImage: "network")
+                        Label("Setup and checks contact GitHub, Homebrew, MacPorts, and Apple services.", systemImage: "network")
                         Label("Updates require your review. Apps are never force-quit.", systemImage: "hand.raised")
-                        Label("No automatic source migration or background installs.", systemImage: "checkmark.shield")
+                        Label("Sources are prepared automatically at launch; app updates require review.", systemImage: "checkmark.shield")
                         Text("Stores up to 1,000 recent update records. Background scheduling and vendor-specific updates are planned for a later release.").font(.caption).foregroundStyle(.secondary)
                     }.font(.callout).padding(12).frame(maxWidth: .infinity, alignment: .leading)
                 }

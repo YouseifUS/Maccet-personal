@@ -6,7 +6,7 @@ import UpdaterCore
 enum Entry {
     @MainActor
     static func main() {
-        if CommandLine.arguments.contains("--scan-json") || CommandLine.arguments.contains("--inventory-json") {
+        if CommandLine.arguments.contains("--scan-json") || CommandLine.arguments.contains("--inventory-json") || CommandLine.arguments.contains("--check-startup-script") {
             let finished = DispatchSemaphore(value: 0)
             Task.detached {
                 await diagnostics()
@@ -21,6 +21,13 @@ enum Entry {
         DesktopApp.main()
     }
     private static func diagnostics() async {
+        if CommandLine.arguments.contains("--check-startup-script") {
+            do {
+                _ = try await ProcessRunner().run("/bin/bash", ["-n", DependencySetup.scriptURL.path]).checked()
+                print("Bundled startup script is available and has valid syntax.")
+            } catch { FileHandle.standardError.write(Data((error.localizedDescription + "\n").utf8)); exit(1) }
+            return
+        }
             var preferences = Preferences()
             if let index = CommandLine.arguments.firstIndex(of: "--folder"), CommandLine.arguments.count > index + 1 {
                 preferences.scanRoots = [CommandLine.arguments[index + 1]]
@@ -46,7 +53,10 @@ struct DesktopApp: App {
     @StateObject private var model = AppModel()
     var body: some Scene {
         WindowGroup("Unified Updater") {
-            ContentView().environmentObject(model).onAppear { AppDelegate.model = model }
+            ContentView().environmentObject(model).onAppear {
+                AppDelegate.model = model
+                model.start()
+            }
         }
             .defaultSize(width: 1240, height: 800)
             .commands {
@@ -63,12 +73,14 @@ struct DesktopApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var model: AppModel?
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let model = Self.model, model.updating else { return .terminateNow }
+        guard let model = Self.model, model.updating || model.settingUp else { return .terminateNow }
         let alert = NSAlert()
-        alert.messageText = "An update queue is still running"
-        alert.informativeText = "Keep the app open until the active installer finishes. You can cancel the remaining apps and quit after the current operation completes."
+        alert.messageText = model.settingUp ? "Update sources are being prepared" : "An update queue is still running"
+        alert.informativeText = model.settingUp
+            ? "Keep the app open until source setup finishes. You can cancel authorization in the macOS dialog. An active installer must finish before the app quits."
+            : "Keep the app open until the active installer finishes. You can cancel the remaining apps and quit after the current operation completes."
         alert.addButton(withTitle: "Keep App Open")
-        alert.addButton(withTitle: "Cancel Remaining")
+        if !model.settingUp { alert.addButton(withTitle: "Cancel Remaining") }
         if alert.runModal() == .alertSecondButtonReturn { model.cancelRequested = true }
         return .terminateCancel
     }

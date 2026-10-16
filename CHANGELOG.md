@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.2 — 2026-10-16
+
+### Added
+
+- Automatic dependency preparation on every GUI launch: install missing Homebrew/MacPorts and install or update mas; refresh existing Homebrew and MacPorts before checking apps.
+- Bundled startup script, progress and failure results, Retry Setup, and protection against quitting during source installers.
+- Official GitHub release installer selection by OS, SHA-256 checks, Gatekeeper assessment, and macOS administrator authorization.
+- Apple developer tools installer handoff when prerequisites are missing.
+- Packaged SwiftPM resources and a read-only startup resource diagnostic.
+
+### Boundaries
+
+- Fresh automatic Homebrew installation uses the official Apple Silicon package. Intel requires an initial manual Homebrew installation; routine maintenance then runs automatically.
+- Apple tool installation and administrator authorization require system interaction. Offline and unsupported installer failures preserve available-source checks and can be retried.
+- Application upgrades still require review. Startup does not run a broad package upgrade or global cleanup.
+- Installer and maintenance behavior is exercised through controlled fixtures; real privileged source installation still needs clean-machine validation.
+
 ## 0.1.1 — 2026-10-16
 
 ### Added

@@ -20,7 +20,7 @@ public struct ScanService {
                 result.sources.append(SourceHealth(source: source, message: "Disabled in Settings.")); continue
             }
             guard let executable = sourcePaths[source] else {
-                result.sources.append(SourceHealth(source: source, message: "\(source.title) not installed. This manager cannot execute updates until it is installed separately.")); continue
+                result.sources.append(SourceHealth(source: source, message: "\(source.title) not installed. Open Sources to inspect or retry automatic setup.")); continue
             }
             var health = SourceHealth(source: source, executable: executable, available: true, message: "Available")
             do {
@@ -31,10 +31,10 @@ public struct ScanService {
                     health.message = "Managed casks checked, including self-updating casks. Catalog metadata may lag upstream releases."
                 } else if source == .macPorts {
                     records = try await MacPortsAdapter(executable: executable, runner: runner).check(apps: updateInventory)
-                    health.message = "Installed-file ownership checked against the local ports index. Sync MacPorts separately if its catalog is stale."
+                    health.message = "Installed-file ownership checked against the local ports index. Launch setup refreshes the index; retry source setup if it is stale."
                 } else {
                     let major = Int(health.version.split(separator: ".").first ?? "0") ?? 0
-                    guard major >= 7 else { throw UpdaterError("mas 7 or later is required for identity-based matching. Update mas separately or use App Store.") }
+                    guard major >= 7 else { throw UpdaterError("mas 7 or later is required for identity-based matching. Retry source setup or use App Store.") }
                     records = try await AppStoreAdapter(executable: executable, runner: runner).check(apps: updateInventory)
                     health.message = "Receipt, bundle identity, and installed path matched. Apple's lookup may lag store availability."
                 }

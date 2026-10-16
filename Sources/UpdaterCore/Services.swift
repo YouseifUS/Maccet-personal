@@ -95,7 +95,7 @@ public struct UpdateEngine {
         guard let executable = app.routeExecutable, let source = app.source else { throw UpdaterError("Missing update route.") }
         guard sourcePaths[source] == executable, FileManager.default.isExecutableFile(atPath: executable) else { throw UpdaterError("The update tool is missing or its location changed. Rescan first.") }
         let fresh = try AppInventory().read(app.path)
-        guard fresh.bundleID == app.bundleID, fresh.version == app.version, fresh.build == app.build,
+        guard fresh.path == app.path, fresh.bundleID == app.bundleID, fresh.version == app.version, fresh.build == app.build,
               fresh.hasStoreReceipt == app.hasStoreReceipt else { throw UpdaterError("\(app.name) changed after the scan. Rescan before updating.") }
         var inventory = AppInventory().discover(roots: [URL(fileURLWithPath: app.path).deletingLastPathComponent().path]).apps
         // Include the actual instance even when a custom root layout is used.

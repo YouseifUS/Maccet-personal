@@ -1,6 +1,39 @@
 # Release validation
 
-Current local alpha: **0.1.2**. Startup dependency preparation is covered by **62 passing checks**, packaging validation, installer trust checks, and an isolated UI failure/retry exercise described below.
+Current local alpha: **0.1.2**. The latest focused validation is recorded first; older sections retain the observations and test counts from their original validation dates. Current source readiness and preparation behavior is documented in [STARTUP_SETUP.md](STARTUP_SETUP.md).
+
+## Canonical application path revalidation — 17 October 2026
+
+The repository's revalidation checked bundle ID, version, build, and receipt, but
+did not compare the newly resolved application path with the scanned path. A
+bundle or parent directory replaced by a symlink could retain identical metadata
+while redirecting source checks and installation to another location. The local
+unpublished implementation already contained the missing path comparison; this
+change brings that check into the repository's shared revalidation method.
+
+Four regressions failed before the fix: **115 passed, 4 failed**. After requiring
+`fresh.path == app.path`, **119 core checks pass**. New fixtures cover a changed
+path before review, a path changed after review, a redirected parent directory,
+and a change during the first source check that the second isolated preflight
+must reject. Initial path mismatches reach no source commands or attempt-cache
+creation. A later preflight failure retains its owned attempt artifacts and
+never reaches installation. A stable symlink discovered before review still
+updates and verifies successfully through its canonical destination.
+
+The **15 setup orchestration checks** also pass. All update commands in these
+tests use controlled runners and temporary fixture bundles. No real applications
+or package managers are updated. A fresh read-only inventory remains **112 apps**
+(34 third-party and 78 system-managed), with **0 warnings**.
+
+The optimized release build, packaging, local ad-hoc signature verification,
+and bundled startup-script check pass. An isolated copy of the unpublished UI
+passes **130 core**, **5 existing UI**, and **15 setup orchestration** checks.
+The original checkout remains unchanged.
+
+This is a path comparison at each existing revalidation boundary. It does not
+atomically bind a later third-party installer to that path, detect every
+replacement at the same canonical location, or add code-signature validation.
+Those remaining identity and installation guarantees require separate work.
 
 ## 0.1.0 baseline
 

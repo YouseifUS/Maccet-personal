@@ -1,6 +1,6 @@
 # Maccet icon
 
-A rounded navy M monogram with an orange update indicator, inspired by the user's supplied reference. The orange dot represents an available update. The source mark uses transparency; the app icon places it on a white macOS tile with transparent outer corners.
+A rounded navy M monogram with an orange update indicator, inspired by the user's supplied reference. The orange dot is a permanent part of the logo, not a live update or unread badge. The source mark uses transparency; the app icon places it on a white macOS tile with transparent outer corners.
 
 - `maccet-mark.png`: generated transparent logo artwork, kept in the repository for reproducible builds.
 - `maccet-icon.png`: 1024-pixel application icon preview.

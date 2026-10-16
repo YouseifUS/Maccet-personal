@@ -1,8 +1,17 @@
 # Automatic source setup — 0.1.2
 
-The GUI prepares its dependencies on every launch, once per app process, before an automatic application scan. Opening another window does not repeat setup. **Sources → Prepare Sources Again** requests a full run; after a partial failure, **Retry Setup** retries unfinished preparation in the current session.
+The GUI prepares enabled sources and their required tools on every launch, once per app process, before an automatic application scan. Opening another window does not repeat setup. **Sources → Prepare Sources Again** requests a full run for the enabled sources; after a partial failure, **Retry Setup** retries unfinished preparation in the current session.
 
 ## Startup sequence
+
+Source switches apply to preparation as well as application checks. A disabled
+source is skipped unless its manager is required by the enabled App Store
+helper: an existing MacPorts-owned mas uses MacPorts; other mas installations,
+including a missing helper, use Homebrew. The setup UI identifies that manager
+as **Required for App Store** even when its own application source is disabled.
+If all sources are disabled, source steps show **Disabled**, developer tools
+show **Not needed**, and inventory continues without setup commands or
+authorization prompts. The sequence below runs only for required tools.
 
 1. Check Apple developer tools with `xcrun --find clang`. If missing, request Apple's installer using `xcode-select --install`. The system controls its download, license, and installation. Finish it and use **Retry Setup**; dependent work is paused until then.
 2. Find Homebrew under `/opt/homebrew/bin` or `/usr/local/bin`. When missing on Apple Silicon, download `Homebrew.pkg` from the latest official `Homebrew/brew` GitHub release, verify the release SHA-256 and Gatekeeper assessment, and install through macOS authorization. Run `brew update` as the logged-in user and check its version.
@@ -26,11 +35,11 @@ The current official Homebrew package supports Apple Silicon. On Intel, install 
 
 An App Store account may still need to be signed in through Apple's own app. Xcode licenses and additional source-specific requirements may need system interaction. The app cannot grant itself system privileges or accept licenses for the user.
 
-The source enable switches affect application checks; all three dependencies are still maintained at launch. Installing an additional manager does not adopt existing applications or automatically expand verified ownership coverage.
+Changing source switches affects app checks and the next preparation run; it does not interrupt an active installer. Disabled source steps do not count as setup failures. Installing an additional manager does not adopt existing applications or automatically expand verified ownership coverage.
 
 ## Scope of automatic changes
 
-Startup updates the tools and their metadata, plus dependencies required to install/update those tools. It never invokes `brew upgrade` without the named `mas` formula, `port upgrade outdated`, application cask upgrades, or global cleanup. Inventory application upgrades continue through the existing explicit review queue.
+Startup updates the enabled source tools and their metadata, plus dependencies required to install/update those tools. It never invokes `brew upgrade` without the named `mas` formula, `port upgrade outdated`, application cask upgrades, or global cleanup. Inventory application upgrades continue through the existing explicit review queue.
 
 The diagnostic entry points `--inventory-json`, `--scan-json`, and `--check-startup-script` bypass GUI setup. The last command validates that the bundled startup script is readable and has valid shell syntax without installing or updating anything.
 
@@ -58,6 +67,28 @@ The isolated inventory baseline remains **112 apps** (34 third-party,
 macOS 27.0.1, Swift 6.4. The original checkout and installed applications were
 left untouched. This closes only the retry behavior in Phase C; need-based
 source preparation, readiness details, and clean-machine acceptance remain open.
+
+## Disabled-source validation — 16 October 2026
+
+The controlled GUI regression failed before this change because disabling all
+sources still triggered preparation commands. After the fix,
+`bash scripts/test.sh` passes **82 core checks** and
+`bash scripts/test-setup-retry.sh` passes **5 orchestration checks**.
+Coverage includes all sources disabled with no tools, Homebrew-only and
+MacPorts-only preparation, both mas ownership routes, a missing helper,
+missing Apple tools, and changing source settings between retries.
+
+The PR release build, packaging, local signature verification, and bundled
+startup-script syntax check pass. A fresh read-only inventory found 112 apps
+with no warnings. No installed applications or source tools were maintained.
+An isolated snapshot containing the unpublished local UI redesign passes
+93 core, 5 existing UI orchestration, and 5 setup orchestration checks. Its
+phase labels were adapted to `SetupPhase.title` and its dependency display
+updated for compatibility; the original checkout was left untouched.
+
+This addresses enabled-source selection in Phase C. Deciding which enabled
+sources are useful to the discovered application inventory, fuller readiness
+reporting, and clean-machine acceptance remain open.
 
 ## References
 

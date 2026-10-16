@@ -1,12 +1,25 @@
 import Foundation
 
-public enum SetupPhase: String { case waiting, running, ready, failed }
+public enum SetupPhase: String {
+    case waiting, running, ready, failed, disabled, notRequired
+    public var title: String {
+        switch self {
+        case .waiting: return "Pending"
+        case .running: return "Preparing"
+        case .ready: return "Ready"
+        case .failed: return "Failed"
+        case .disabled: return "Disabled"
+        case .notRequired: return "Not needed"
+        }
+    }
+}
 
 public struct SetupItem: Identifiable {
     public var id: String
     public var title: String
     public var phase: SetupPhase = .waiting
     public var message: String = "Waiting"
+    public var dependencyFor: UpdateSource? = nil
     public init(id: String, title: String) { self.id = id; self.title = title }
 }
 
@@ -48,16 +61,31 @@ public struct DependencySetup {
         // Installer processes must finish; never kill a privileged installer on a timer.
         _ = try await command("/bin/bash", [Self.scriptURL.path] + arguments, timeout: nil)
     }
-    public func prepare(retrying previousItems: [SetupItem]? = nil, progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
+    public func prepare(disabledSources: Set<UpdateSource> = [], retrying previousItems: [SetupItem]? = nil, progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
         // Reuse successful preparation only for an explicit retry in this session.
         var items = Self.initialItems.map { initial in
             guard let ready = previousItems?.first(where: { $0.id == initial.id && $0.phase == .ready }),
                   initial.id == "tools" || locate(initial.id) != nil else { return initial }
-            return ready
+            var reused = ready
+            reused.dependencyFor = nil
+            return reused
         }
         func report(_ index: Int, _ phase: SetupPhase, _ message: String) async {
             items[index].phase = phase; items[index].message = Diagnostics.redact(message)
             await progress(items)
+        }
+        let needsMas = !disabledSources.contains(.appStore)
+        let masUsesPorts = needsMas && locate("mas") == "/opt/local/bin/mas"
+        let needsBrew = !disabledSources.contains(.homebrew) || (needsMas && !masUsesPorts)
+        let needsPorts = !disabledSources.contains(.macPorts) || masUsesPorts
+        if !needsBrew { await report(1, .disabled, "Homebrew is disabled in Settings.") }
+        else if disabledSources.contains(.homebrew) { items[1].dependencyFor = .appStore }
+        if !needsPorts { await report(2, .disabled, "MacPorts is disabled in Settings.") }
+        else if disabledSources.contains(.macPorts) { items[2].dependencyFor = .appStore }
+        if !needsMas { await report(3, .disabled, "App Store is disabled in Settings.") }
+        guard needsBrew || needsPorts else {
+            await report(0, .notRequired, "No enabled source requires developer tools.")
+            return items
         }
         await report(0, .running, "Checking Apple developer tools…")
         do {
@@ -67,11 +95,13 @@ public struct DependencySetup {
             // Apple owns the download, license, and installation UI.
             _ = try? await command("/usr/bin/xcode-select", ["--install"], timeout: 20)
             await report(0, .failed, "Complete Apple's developer tools installer, then choose Retry Setup.")
-            for index in 1..<items.count { await report(index, .failed, "Waiting for Apple developer tools. Retry Setup after installation.") }
+            for index in 1..<items.count where items[index].phase != .disabled {
+                await report(index, .failed, "Waiting for Apple developer tools. Retry Setup after installation.")
+            }
             return items
         }
         var brew: String? = items[1].phase == .ready ? locate("brew") : nil
-        if items[1].phase != .ready {
+        if needsBrew && items[1].phase != .ready {
             await report(1, .running, locate("brew") == nil ? "Downloading and installing Homebrew…" : "Updating Homebrew…")
             do {
                 if locate("brew") == nil {
@@ -88,7 +118,7 @@ public struct DependencySetup {
             } catch { await report(1, .failed, error.localizedDescription) }
         }
 
-        if items[2].phase != .ready {
+        if needsPorts && items[2].phase != .ready {
             await report(2, .running, locate("port") == nil ? "Downloading and installing MacPorts…" : "Updating MacPorts and its index…")
             do {
                 if locate("port") == nil { try await installPackage(repository: "macports/macports-base", tool: "port") }
@@ -99,7 +129,7 @@ public struct DependencySetup {
             } catch { await report(2, .failed, error.localizedDescription) }
         }
 
-        if items[3].phase != .ready {
+        if needsMas && items[3].phase != .ready {
             await report(3, .running, "Installing or updating the App Store helper…")
             do {
                 // Keep an existing MacPorts-owned mas under that manager.

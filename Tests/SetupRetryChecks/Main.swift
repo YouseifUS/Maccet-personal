@@ -8,7 +8,9 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
 private final class SetupRunner: CommandRunning {
     var failPorts = true
     var actions: [String] = []
+    var calls = 0
     func run(_ executable: String, _ arguments: [String], environment: [String: String], timeout: TimeInterval?) async throws -> CommandResult {
+        calls += 1
         if executable == "/usr/bin/xcrun" { return CommandResult(output: "/usr/bin/clang") }
         if executable == "/bin/bash", arguments.count > 1 {
             let action = arguments[1]; actions.append(action)
@@ -68,7 +70,21 @@ private final class SetupRunner: CommandRunning {
             fresh.start(); try await wait(fresh)
             try expect(Array(runner.actions.suffix(3)) == ["brew-update", "ports-update", "mas-update"] && runner.actions.count == 7, "A fresh session reused previous setup success")
             print("PASS A fresh session runs full preparation")
-            print("\n3 setup orchestration checks passed; 0 failed.")
+            let disabled = session()
+            disabled.preferences.disabledSources = Set(UpdateSource.allCases)
+            let callsBefore = runner.calls
+            disabled.start(); try await wait(disabled)
+            try expect(runner.calls == callsBefore, "Disabled sources still triggered preparation commands")
+            try expect(!disabled.setupNeedsAttention && disabled.lastScan != nil, "Disabled setup prevented inventory or required attention")
+            print("PASS Disabling every source skips setup commands and preserves inventory")
+            let homebrewOnly = session()
+            homebrewOnly.preferences.disabledSources = [.macPorts, .appStore]
+            let actionsBefore = runner.actions.count
+            homebrewOnly.start(); try await wait(homebrewOnly)
+            try expect(runner.actions.count == actionsBefore + 1 && runner.actions.last == "brew-update", "Single-source settings were not passed to preparation")
+            try expect(homebrewOnly.setupItems[2].phase == .disabled && homebrewOnly.setupItems[3].phase == .disabled && !homebrewOnly.setupNeedsAttention, "Disabled steps were presented as failures")
+            print("PASS GUI setup prepares only the enabled source")
+            print("\n5 setup orchestration checks passed; 0 failed.")
         } catch {
             FileHandle.standardError.write(Data("FAIL \(error)\n".utf8)); exit(1)
         }

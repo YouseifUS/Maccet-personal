@@ -619,6 +619,60 @@ private enum Checks {
             try expect(snapshots.contains { $0.contains { $0.phase == .running } })
             try expect(fixture.runner.calls.allSatisfy { !$0.args.contains("outdated") && !$0.args.contains("--cask") })
         }
+        await check("Disabled sources run no setup commands even when all tools are missing") {
+            let fixture = SetupFixture(); fixture.paths = [:]; fixture.toolsMissing = true
+            let result = await fixture.service().prepare(disabledSources: Set(UpdateSource.allCases))
+            try expect(fixture.runner.calls.isEmpty)
+            try expect(result[0].phase == .notRequired && result.dropFirst().allSatisfy { $0.phase == .disabled })
+        }
+        await check("Homebrew-only setup leaves disabled missing MacPorts and mas untouched") {
+            let fixture = SetupFixture(); fixture.paths = ["brew": "/opt/homebrew/bin/brew"]
+            let result = await fixture.service().prepare(disabledSources: [.macPorts, .appStore])
+            try expect(fixture.actions == ["brew-update"])
+            try expect(result[1].phase == .ready && result[2].phase == .disabled && result[3].phase == .disabled)
+            try expect(!fixture.runner.calls.contains { $0.executable == "/usr/bin/curl" })
+        }
+        await check("MacPorts-only setup leaves disabled missing Homebrew and mas untouched") {
+            let fixture = SetupFixture(); fixture.paths = ["port": "/opt/local/bin/port"]
+            let result = await fixture.service().prepare(disabledSources: [.homebrew, .appStore])
+            try expect(fixture.actions == ["ports-update"])
+            try expect(result[1].phase == .disabled && result[2].phase == .ready && result[3].phase == .disabled)
+        }
+        await check("App Store setup prepares disabled Homebrew as an explicit helper dependency") {
+            let fixture = SetupFixture(); fixture.paths.removeValue(forKey: "port")
+            let result = await fixture.service().prepare(disabledSources: [.homebrew, .macPorts])
+            try expect(fixture.actions == ["brew-update", "mas-update"])
+            try expect(result[1].phase == .ready && result[1].dependencyFor == .appStore && result[2].phase == .disabled && result[3].phase == .ready)
+        }
+        await check("A MacPorts-owned App Store helper requires only its manager") {
+            let fixture = SetupFixture(); fixture.paths["mas"] = "/opt/local/bin/mas"
+            let result = await fixture.service().prepare(disabledSources: [.homebrew, .macPorts])
+            try expect(fixture.actions == ["ports-update", "ports-mas-update"])
+            try expect(result[1].phase == .disabled && result[2].dependencyFor == .appStore && result[3].phase == .ready)
+        }
+        await check("A missing App Store helper installs only its required Homebrew route") {
+            let fixture = SetupFixture(); fixture.paths = [:]; fixture.ownedMas = false
+            let result = await fixture.service().prepare(disabledSources: [.homebrew, .macPorts])
+            try expect(fixture.actions == ["install-package", "brew-update", "mas-install"])
+            try expect(result[1].dependencyFor == .appStore && result[2].phase == .disabled && result[3].phase == .ready)
+        }
+        await check("Disabled steps stay disabled when developer tools are missing") {
+            let fixture = SetupFixture(); fixture.toolsMissing = true
+            let result = await fixture.service().prepare(disabledSources: [.macPorts, .appStore])
+            try expect(result[0].phase == .failed && result[1].phase == .failed && result[2].phase == .disabled && result[3].phase == .disabled)
+            try expect(fixture.actions.isEmpty)
+        }
+        await check("Retry respects source changes and re-enabling prepares only unfinished work") {
+            let fixture = SetupFixture(); fixture.failPorts = true
+            let first = await fixture.service().prepare()
+            let disabled = await fixture.service().prepare(disabledSources: [.macPorts], retrying: first)
+            try expect(disabled[2].phase == .disabled && !disabled.contains { $0.phase == .failed })
+            try expect(fixture.actions == ["brew-update", "ports-update", "mas-update"])
+            fixture.failPorts = false
+            let enabled = await fixture.service().prepare(retrying: disabled)
+            try expect(enabled.allSatisfy { $0.phase == .ready } && enabled[1].dependencyFor == nil)
+            try expect(fixture.actions == ["brew-update", "ports-update", "mas-update", "ports-update"])
+        }
         await check("Startup installs missing managers from verified official packages and then mas") {
             let fixture = SetupFixture(); fixture.paths = [:]; fixture.ownedMas = false
             let result = await fixture.service().prepare()

@@ -44,12 +44,14 @@ final class AppModel: ObservableObject {
     @Published var inspected: AppRecord?
     @Published var review: [PlannedUpdate] = []
     @Published var showingReview = false
+    @Published var errorTitle = "Needs attention"
     @Published var error: String?
     @Published var status = "Ready for your first check"
     let store: LocalStore
     let cacheRoot: URL
     let runner: any CommandRunning
     private let setupLocate: (String) -> String?
+    private let sourcePaths: [UpdateSource: String]?
     var busy: Bool { settingUp || scanning || preparing || updating }
     var setupNeedsAttention: Bool { setupItems.contains { $0.phase.needsAttention } }
     var setupActionTitle: String { setupWasPrepared ? (setupNeedsAttention ? "Retry Setup" : "Prepare Sources Again") : "Prepare Sources" }
@@ -68,14 +70,15 @@ final class AppModel: ObservableObject {
             default: screenMatch = true
             }
             let visible = showIgnored || (!preferences.ignoredPaths.contains(app.id) && preferences.skippedReleases[app.id] != app.releaseIdentity)
-            return screenMatch && visible && (sourceFilter == nil || app.source == sourceFilter)
+            return screenMatch && visible && (screen == .appStore || sourceFilter == nil || app.source == sourceFilter)
                 && (search.isEmpty || app.name.localizedCaseInsensitiveContains(search) || app.bundleID.localizedCaseInsensitiveContains(search))
         }
     }
 
-    init(runner: any CommandRunning = ProcessRunner(), setupLocate: @escaping (String) -> String? = ToolLocator.find) {
+    init(runner: any CommandRunning = ProcessRunner(), sourcePaths: [UpdateSource: String]? = nil, setupLocate: @escaping (String) -> String? = ToolLocator.find) {
         self.runner = runner
         self.setupLocate = setupLocate
+        self.sourcePaths = sourcePaths
         let override = ProcessInfo.processInfo.environment["UNIFIED_UPDATER_DATA_DIR"]
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let root = override.map { URL(fileURLWithPath: $0) } ?? support.appendingPathComponent("UnifiedUpdater")
@@ -89,7 +92,7 @@ final class AppModel: ObservableObject {
                 history = store.recover(try store.load([ActivityRecord].self, file: "history.json"))
                 try store.save(history, file: "history.json")
             }
-        } catch { self.error = "Saved data could not be read. Existing files were retained. " + error.localizedDescription }
+        } catch { self.errorTitle = "Saved data couldn’t be read"; self.error = "Saved data could not be read. Existing files were retained. " + error.localizedDescription }
         sources = UpdateSource.allCases.map { source in
             let path = ToolLocator.find(source.toolName)
             return SourceHealth(source: source, executable: path, available: path != nil, message: path == nil ? "Not installed" : "Ready to check")
@@ -142,7 +145,7 @@ final class AppModel: ObservableObject {
         scanning = true; selected.removeAll(); status = "Reading applications and checking sources…"
         let prefs = preferences
         Task { [self] in
-            let result = await ScanService(runner: runner, cacheRoot: cacheRoot).scan(preferences: prefs) { [weak self] partial in
+            let result = await ScanService(runner: runner, cacheRoot: cacheRoot, sourcePaths: sourcePaths).scan(preferences: prefs) { [weak self] partial in
                 await MainActor.run {
                     self?.apps = partial.apps; self?.sources = partial.sources; self?.warnings = partial.warnings
                 }
@@ -158,9 +161,9 @@ final class AppModel: ObservableObject {
         preparing = true; status = "Preparing the update plan…"
         Task { [self] in
             do {
-                review = try await UpdateEngine(runner: runner, cacheRoot: cacheRoot).prepare(candidates, preferences: preferences)
+                review = try await UpdateEngine(runner: runner, cacheRoot: cacheRoot, sourcePaths: sourcePaths).prepare(candidates, preferences: preferences)
                 showingReview = true; status = "Review the selected updates"
-            } catch { self.error = Diagnostics.redact(error.localizedDescription); status = "Plan needs attention" }
+            } catch { self.errorTitle = "The update plan changed"; self.error = Diagnostics.redact(error.localizedDescription); status = "Plan needs attention" }
             preparing = false
         }
     }
@@ -174,7 +177,7 @@ final class AppModel: ObservableObject {
         let plan = review
         let cleanup = preferences.cleanupAfterSuccess
         showingReview = false; review = []; updating = true; cancelRequested = false
-        let engine = UpdateEngine(runner: runner, cacheRoot: cacheRoot)
+        let engine = UpdateEngine(runner: runner, cacheRoot: cacheRoot, sourcePaths: sourcePaths)
         var ids: [String: UUID] = [:]
         for item in plan {
             let entry = ActivityRecord(app: item.app, state: .queued, message: "Waiting in the reviewed queue.")
@@ -240,6 +243,7 @@ final class AppModel: ObservableObject {
     func skip(_ app: AppRecord) { preferences.skippedReleases[app.id] = app.releaseIdentity; selected.remove(app.id); savePreferences() }
     func addFolder() {
         let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = true
+        panel.title = "Choose application folders"; panel.prompt = "Add Folders"
         panel.message = "Choose folders containing applications. System apps are listed for reference and updated through macOS."
         if panel.runModal() == .OK {
             for url in panel.urls {
@@ -275,11 +279,11 @@ final class AppModel: ObservableObject {
         } else if app.hasStoreReceipt { NSWorkspace.shared.open(URL(string: "macappstore://showUpdatesPage")!) }
     }
     func exportReport() {
-        let panel = NSSavePanel(); panel.allowedContentTypes = [.json]; panel.nameFieldStringValue = "updater-report.json"
+        let panel = NSSavePanel(); panel.allowedContentTypes = [.json]; panel.nameFieldStringValue = "maccet-report.json"; panel.title = "Export Maccet report"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             let data = try ReportExport.data(apps: apps, sources: sources, history: history, lastScan: lastScan)
             try data.write(to: url, options: .atomic)
-        } catch { self.error = error.localizedDescription }
+        } catch { self.errorTitle = "Couldn’t export the report"; self.error = error.localizedDescription }
     }
 }

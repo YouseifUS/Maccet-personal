@@ -52,7 +52,7 @@ struct DesktopApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = AppModel()
     var body: some Scene {
-        WindowGroup("Unified Updater") {
+        WindowGroup("Maccet") {
             ContentView().environmentObject(model).onAppear {
                 AppDelegate.model = model
                 model.start()
@@ -61,6 +61,15 @@ struct DesktopApp: App {
             .defaultSize(width: 1240, height: 800)
             .commands {
                 CommandGroup(replacing: .newItem) {}
+                CommandGroup(replacing: .appInfo) {
+                    Button("About Maccet") {
+                        NSApplication.shared.orderFrontStandardAboutPanel(options: [
+                            .applicationName: "Maccet", .applicationIcon: Maccet.icon,
+                            .applicationVersion: Maccet.version, .version: Maccet.build,
+                            .credits: NSAttributedString(string: "Alpha\nA little less to keep up with.", attributes: [.font: NSFont.systemFont(ofSize: 12)])
+                        ])
+                    }
+                }
                 CommandGroup(after: .appInfo) {
                     Button("Check for Updates") { model.scan() }.keyboardShortcut("r", modifiers: .command).disabled(model.busy)
                     Button("Export Report…") { model.exportReport() }
@@ -75,11 +84,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let model = Self.model, model.updating || model.maintainingSources else { return .terminateNow }
         let alert = NSAlert()
-        alert.messageText = model.maintainingSources ? "Update sources are being prepared" : "An update queue is still running"
+        alert.messageText = model.maintainingSources ? "Sources are still being prepared" : "An update is still running"
         alert.informativeText = model.maintainingSources
             ? "Keep the app open until source setup finishes. You can cancel authorization in the macOS dialog. An active installer must finish before the app quits."
             : "Keep the app open until the active installer finishes. You can cancel the remaining apps and quit after the current operation completes."
-        alert.addButton(withTitle: "Keep App Open")
+        alert.addButton(withTitle: "Keep Maccet Open")
         if !model.maintainingSources { alert.addButton(withTitle: "Cancel Remaining") }
         if alert.runModal() == .alertSecondButtonReturn { model.cancelRequested = true }
         return .terminateCancel

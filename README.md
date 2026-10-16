@@ -56,7 +56,7 @@ Choose **Sources → Prepare Sources** to install and update these dependencies.
 
 ## Run the app
 
-Build with the script below, then open `dist/Unified Updater.app`. The included binary archive is built for the architecture stated in its filename.
+Build with the script below, then open `dist/Maccet.app`. The included binary archive is built for the architecture stated in its filename.
 
 1. Wait for source readiness checks and the initial application scan. Open **Sources** to inspect results. Choose **Prepare Sources** when tools need installation or maintenance, complete any macOS authorization, and use **Retry Setup** after a preparation failure.
 2. Review application folders in **Settings**.
@@ -105,7 +105,7 @@ Install Apple's Command Line Tools or Xcode with a Swift toolchain compatible wi
 ```bash
 bash scripts/test.sh
 bash scripts/build.sh
-open 'dist/Unified Updater.app'
+open 'dist/Maccet.app'
 ```
 
 The build script creates the release executable, application bundle, generated icon, and a ZIP archive in `dist/`. It signs the local app with an ad-hoc signature. The app is **not Developer ID signed or notarized**, and this alpha is not a public distribution release. Developer ID signing and notarization require the owner's signing configuration and remain a separate release step.
@@ -119,16 +119,16 @@ The minimum tools version in the manifest is Swift 5.9. Testing older compiler/S
 bash scripts/test.sh
 
 # Validate the packaged startup resource without installing anything.
-'dist/Unified Updater.app/Contents/MacOS/UnifiedUpdater' --check-startup-script
+'dist/Maccet.app/Contents/MacOS/UnifiedUpdater' --check-startup-script
 
 # Inventory only: no remote source checks.
-'dist/Unified Updater.app/Contents/MacOS/UnifiedUpdater' --inventory-json
+'dist/Maccet.app/Contents/MacOS/UnifiedUpdater' --inventory-json
 
 # Full read-only source check. May refresh source metadata caches.
-'dist/Unified Updater.app/Contents/MacOS/UnifiedUpdater' --scan-json
+'dist/Maccet.app/Contents/MacOS/UnifiedUpdater' --scan-json
 
 # Restrict diagnostics to one application folder.
-'dist/Unified Updater.app/Contents/MacOS/UnifiedUpdater' --inventory-json --folder /Applications
+'dist/Maccet.app/Contents/MacOS/UnifiedUpdater' --inventory-json --folder /Applications
 ```
 
 The check suite is an executable target named `UpdaterCoreChecks`, rather than XCTest, so it also runs on a Command Line Tools installation without Xcode's test frameworks. It exits nonzero when a check fails and exercises the real core with synthetic app bundles and fake source processes. A real process is used only for benign output/timeout checks.

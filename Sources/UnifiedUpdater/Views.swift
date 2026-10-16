@@ -185,7 +185,7 @@ struct ContentView: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Update source setup").font(.headline)
-                Text("Maccet installs missing sources and updates Homebrew, MacPorts, and mas every time you open the app. macOS may ask for administrator permission. Application updates still require your review.")
+                Text("Maccet prepares enabled sources and their required tools when you open the app. macOS may ask for administrator permission. Application updates still require your review.")
                     .font(.callout).foregroundStyle(.secondary)
                 ForEach(model.setupItems) { item in
                     HStack(alignment: .top, spacing: 12) {
@@ -193,7 +193,14 @@ struct ContentView: View {
                         else { Image(systemName: item.phase == .ready ? "checkmark.circle.fill" : item.phase == .failed ? "exclamationmark.circle" : "circle")
                             .foregroundStyle(item.phase == .failed ? Color.orange : item.phase == .ready ? accent : Color.secondary).frame(width: 20) }
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(item.title).font(.callout.weight(.medium))
+                            HStack {
+                                Text(item.title).font(.callout.weight(.medium))
+                                Spacer()
+                                Text(item.phase.title).font(.caption).foregroundStyle(.secondary)
+                            }
+                            if let source = item.dependencyFor {
+                                Text("Required for \(source.title)").font(.caption).foregroundStyle(.secondary)
+                            }
                             Text(item.message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -233,7 +240,7 @@ struct ContentView: View {
                             if let path = source.executable { Text(path).font(.caption.monospaced()).textSelection(.enabled) }
                             if let error = source.error { Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
                             HStack {
-                                Toggle("Use this source for app checks", isOn: Binding(get: { !model.preferences.disabledSources.contains(source.source) }, set: { enabled in
+                                Toggle("Enable this source", isOn: Binding(get: { !model.preferences.disabledSources.contains(source.source) }, set: { enabled in
                                     if enabled { model.preferences.disabledSources.remove(source.source) } else { model.preferences.disabledSources.insert(source.source) }
                                     model.savePreferences(); model.invalidateInventory()
                                 })).toggleStyle(.switch).disabled(model.busy)
@@ -244,7 +251,7 @@ struct ContentView: View {
                     }
                 }
                 Text("Each app appears once. When several installed managers claim it, choose one update route in the app's Details. A catalog match alone cannot take over an existing installation.").font(.callout).foregroundStyle(.secondary)
-                Label("Source setup runs at launch. These switches control application checks; they do not disable source maintenance. Sparkle and vendor adapters are planned for a later release.", systemImage: "info.circle").font(.callout).foregroundStyle(.secondary)
+                Label("These switches control checks and future source preparation. A disabled manager may still be needed for the enabled App Store helper. Sparkle and vendor adapters are planned for a later release.", systemImage: "info.circle").font(.callout).foregroundStyle(.secondary)
             }.padding(26)
         }
     }

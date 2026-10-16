@@ -36,7 +36,7 @@ Installing a manager does not make it the owner of existing direct-download appl
 - Checks App Store applications through `mas` 7+, matching receipt presence, bundle ID, store ID, and installed path.
 - Shows installed/target versions, source health, partial coverage, and manual actions.
 - Offers individual, selected, and all-eligible update plans with a review screen.
-- Revalidates the app identity, source, and target release before installation.
+- Revalidates the app's canonical path, identity, source, and target release before installation. A changed destination requires a new scan and review.
 - Defers running apps, or requests a normal quit when you opt in. It never force-quits.
 - Uses the macOS administrator authorization dialog for `mas update` when required.
 - Verifies fresh installed version/build metadata after an update command finishes.

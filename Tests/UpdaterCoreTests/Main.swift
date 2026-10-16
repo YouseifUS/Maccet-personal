@@ -325,6 +325,91 @@ private enum Checks {
             let result = await engine.execute(PlannedUpdate(app: app, preview: ""), cleanup: true) { _, _ in }
             try expect(result.state == .failed && !runner.calls.contains { $0.args.first == "upgrade" })
         }
+        await check("A changed application path blocks review before any manager command") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let app = try fixture.candidate()
+            let relocated = fixture.root.appendingPathComponent("Relocated.app")
+            try FileManager.default.moveItem(at: fixture.appURL, to: relocated)
+            try FileManager.default.createSymbolicLink(at: fixture.appURL, withDestinationURL: relocated)
+            let runner = try fixture.runner()
+            let engine = UpdateEngine(runner: runner, sourcePaths: [.homebrew: "/usr/bin/true"])
+            do {
+                _ = try await engine.prepare([app], preferences: Preferences())
+                throw CheckFailure(description: "A changed canonical path produced a review plan")
+            } catch let error as UpdaterError {
+                try expect(error.message.contains("changed after the scan"))
+            }
+            try expect(runner.calls.isEmpty, "A changed canonical path reached a manager during review")
+        }
+        await check("A reviewed path replaced by a symlink fails before commands or cache creation") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let runner = try fixture.runner()
+            let cacheRoot = fixture.root.appendingPathComponent("Cache")
+            let engine = UpdateEngine(runner: runner, cacheRoot: cacheRoot, sourcePaths: [.homebrew: "/usr/bin/true"])
+            let plan = try await engine.prepare([fixture.candidate()], preferences: Preferences())[0]
+            runner.calls = []
+            let relocated = fixture.root.appendingPathComponent("Relocated.app")
+            try FileManager.default.moveItem(at: fixture.appURL, to: relocated)
+            try FileManager.default.createSymbolicLink(at: fixture.appURL, withDestinationURL: relocated)
+            let fresh = try fixture.app()
+            try expect(fresh.bundleID == plan.app.bundleID && fresh.version == plan.app.version && fresh.build == plan.app.build && fresh.path != plan.app.path)
+            var stages: [TaskState] = []
+            let result = await engine.execute(plan, cleanup: true) { stage, _ in stages.append(stage) }
+            try expect(result.state == .failed && result.message.contains("changed after the scan"))
+            try expect(runner.calls.isEmpty && stages == [.preflight], "The changed path reached a source command or installer")
+            try expect(!FileManager.default.fileExists(atPath: cacheRoot.appendingPathComponent("Operations").path))
+            try expect(try fixture.app().version == "1.0" && FileManager.default.fileExists(atPath: relocated.path))
+        }
+        await check("Replacing an application's parent directory with a symlink blocks execution") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let parent = fixture.root.appendingPathComponent("Managed")
+            let relocated = fixture.root.appendingPathComponent("Relocated")
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+            var app = try fixture.candidate()
+            try FileManager.default.moveItem(at: fixture.appURL, to: parent.appendingPathComponent("Example.app"))
+            app.path = parent.appendingPathComponent("Example.app").path
+            try FileManager.default.moveItem(at: parent, to: relocated)
+            try FileManager.default.createSymbolicLink(at: parent, withDestinationURL: relocated)
+            let runner = try fixture.runner()
+            let result = await UpdateEngine(runner: runner, sourcePaths: [.homebrew: "/usr/bin/true"])
+                .execute(PlannedUpdate(app: app, preview: ""), cleanup: true) { _, _ in }
+            try expect(result.state == .failed && runner.calls.isEmpty, "A changed parent path reached a source command")
+        }
+        await check("A path changed during source checking is rejected by isolated preflight") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let app = try fixture.candidate()
+            let runner = try fixture.runner()
+            let normal = runner.handler
+            var relocated = false
+            runner.handler = { call in
+                if call.args.first == "info", !relocated {
+                    let target = fixture.root.appendingPathComponent("Relocated.app")
+                    try FileManager.default.moveItem(at: fixture.appURL, to: target)
+                    try FileManager.default.createSymbolicLink(at: fixture.appURL, withDestinationURL: target)
+                    relocated = true
+                }
+                return try normal(call)
+            }
+            let cacheRoot = fixture.root.appendingPathComponent("Cache")
+            let result = await UpdateEngine(runner: runner, cacheRoot: cacheRoot, sourcePaths: [.homebrew: "/usr/bin/true"])
+                .execute(PlannedUpdate(app: app, preview: ""), cleanup: true) { _, _ in }
+            try expect(result.state == .failed && result.message.contains("changed after the scan"))
+            try expect(!runner.calls.contains { $0.args.first == "upgrade" } && runner.calls.filter { $0.args.first == "info" }.count == 1)
+            try expect(try FileManager.default.contentsOfDirectory(atPath: cacheRoot.appendingPathComponent("Operations").path).count == 1, "Failed-attempt artifacts were removed")
+        }
+        await check("A stable application symlink discovered before review remains updateable") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let target = fixture.root.appendingPathComponent("Actual.app")
+            try FileManager.default.moveItem(at: fixture.appURL, to: target)
+            try FileManager.default.createSymbolicLink(at: fixture.appURL, withDestinationURL: target)
+            let app = try fixture.candidate()
+            try expect(app.path == target.path)
+            let runner = try fixture.runner { try fixture.write(version: "2.0", build: "20") }
+            let engine = UpdateEngine(runner: runner, cacheRoot: fixture.root.appendingPathComponent("Cache"), sourcePaths: [.homebrew: "/usr/bin/true"])
+            let plan = try await engine.prepare([app], preferences: Preferences())[0]
+            let result = await engine.execute(plan, cleanup: true) { _, _ in }
+            try expect(result.state == .succeeded, result.message)
+        }
         await check("Cleanup requires verified status and a matching ownership marker") {
             let fixture = try Fixture(); defer { fixture.clean() }
             let cache = try OwnedUpdateCache(root: fixture.root.appendingPathComponent("Operations"))

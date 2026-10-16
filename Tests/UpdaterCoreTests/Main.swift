@@ -61,6 +61,7 @@ private final class SetupFixture {
     var paths = ["brew": "/opt/homebrew/bin/brew", "port": "/opt/local/bin/port", "mas": "/opt/homebrew/bin/mas"]
     var toolsMissing = false
     var failBrew = false
+    var failPorts = false
     var badDigest = false
     var rejectSignature = false
     var cancelInstall = false
@@ -86,7 +87,8 @@ private final class SetupFixture {
         if call.executable == "/bin/bash" {
             switch call.args[1] {
             case "brew-update": return CommandResult(status: self.failBrew ? 1 : 0, errorOutput: self.failBrew ? "Network unavailable" : "")
-            case "ports-update", "ports-mas-update": return CommandResult()
+            case "ports-update": return CommandResult(status: self.failPorts ? 1 : 0, errorOutput: self.failPorts ? "Network unavailable" : "")
+            case "ports-mas-update": return CommandResult()
             case "mas-install", "mas-update": self.paths["mas"] = "/opt/homebrew/bin/mas"; return CommandResult()
             case "install-package":
                 if self.cancelInstall { return CommandResult(status: 1, errorOutput: "User canceled. (-128)") }
@@ -633,6 +635,58 @@ private enum Checks {
             let result = await fixture.service().prepare()
             try expect(result[1].phase == .failed && result[2].phase == .ready && result[3].phase == .failed)
             try expect(fixture.actions == ["brew-update", "ports-update"])
+        }
+        await check("Retrying failed Homebrew setup preserves successful MacPorts preparation") {
+            let fixture = SetupFixture(); fixture.failBrew = true
+            let first = await fixture.service().prepare()
+            try expect(first[1].phase == .failed && first[2].phase == .ready && first[3].phase == .failed)
+            fixture.failBrew = false
+            let retried = await fixture.service().prepare(retrying: first)
+            try expect(retried.allSatisfy { $0.phase == .ready })
+            try expect(fixture.actions == ["brew-update", "ports-update", "brew-update", "mas-update"], "Retry repeated successful MacPorts maintenance")
+        }
+        await check("Retrying failed MacPorts setup preserves successful Homebrew and mas preparation") {
+            let fixture = SetupFixture(); fixture.failPorts = true
+            let first = await fixture.service().prepare()
+            try expect(first[1].phase == .ready && first[2].phase == .failed && first[3].phase == .ready)
+            fixture.failPorts = false
+            let retried = await fixture.service().prepare(retrying: first)
+            try expect(retried.allSatisfy { $0.phase == .ready })
+            try expect(fixture.actions == ["brew-update", "ports-update", "mas-update", "ports-update"], "Retry repeated successful Homebrew or mas maintenance")
+        }
+        await check("A repeated setup failure leaves successful tools ready without repeating their work") {
+            let fixture = SetupFixture(); fixture.failPorts = true
+            let first = await fixture.service().prepare()
+            var snapshots: [[SetupItem]] = []
+            let retried = await fixture.service().prepare(retrying: first) { snapshots.append($0) }
+            try expect(retried[2].phase == .failed && retried[1].phase == .ready && retried[3].phase == .ready)
+            try expect(fixture.actions == ["brew-update", "ports-update", "mas-update", "ports-update"])
+            try expect(snapshots.allSatisfy { $0[1].phase == .ready && $0[3].phase == .ready })
+        }
+        await check("Retrying an incompatible mas refreshes only the failed helper") {
+            let fixture = SetupFixture(); fixture.masVersion = "6.0.0"
+            let first = await fixture.service().prepare()
+            fixture.masVersion = "7.0.0"
+            let retried = await fixture.service().prepare(retrying: first)
+            try expect(retried.allSatisfy { $0.phase == .ready })
+            try expect(fixture.actions == ["brew-update", "ports-update", "mas-update", "mas-update"])
+        }
+        await check("A previously ready tool that disappeared is prepared again on retry") {
+            let fixture = SetupFixture(); fixture.failBrew = true
+            let first = await fixture.service().prepare()
+            fixture.failBrew = false; fixture.paths.removeValue(forKey: "port")
+            let retried = await fixture.service().prepare(retrying: first)
+            try expect(retried.allSatisfy { $0.phase == .ready })
+            try expect(fixture.actions == ["brew-update", "ports-update", "brew-update", "install-package", "ports-update", "mas-update"])
+        }
+        await check("Retry preserves a ready MacPorts-owned mas while fixing Homebrew") {
+            let fixture = SetupFixture(); fixture.failBrew = true; fixture.paths["mas"] = "/opt/local/bin/mas"
+            let first = await fixture.service().prepare()
+            try expect(first[1].phase == .failed && first[3].phase == .ready)
+            fixture.failBrew = false
+            let retried = await fixture.service().prepare(retrying: first)
+            try expect(retried.allSatisfy { $0.phase == .ready })
+            try expect(fixture.actions == ["brew-update", "ports-update", "ports-mas-update", "brew-update"])
         }
         await check("Missing Apple tools launch Apple's installer and block dependent work") {
             let fixture = SetupFixture(); fixture.toolsMissing = true

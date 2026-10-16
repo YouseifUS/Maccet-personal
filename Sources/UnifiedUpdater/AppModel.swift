@@ -46,7 +46,8 @@ final class AppModel: ObservableObject {
     @Published var status = "Ready for your first check"
     let store: LocalStore
     let cacheRoot: URL
-    let runner = ProcessRunner()
+    let runner: any CommandRunning
+    private let setupLocate: (String) -> String?
     var busy: Bool { settingUp || scanning || preparing || updating }
     var setupNeedsAttention: Bool { setupItems.contains { $0.phase == .failed } }
     var eligible: [AppRecord] { apps.filter(preferences.isEligible) }
@@ -68,7 +69,9 @@ final class AppModel: ObservableObject {
         }
     }
 
-    init() {
+    init(runner: any CommandRunning = ProcessRunner(), setupLocate: @escaping (String) -> String? = ToolLocator.find) {
+        self.runner = runner
+        self.setupLocate = setupLocate
         let override = ProcessInfo.processInfo.environment["UNIFIED_UPDATER_DATA_DIR"]
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let root = override.map { URL(fileURLWithPath: $0) } ?? support.appendingPathComponent("UnifiedUpdater")
@@ -97,11 +100,12 @@ final class AppModel: ObservableObject {
 
     func prepareSources() {
         guard !busy else { return }
-        settingUp = true; setupItems = DependencySetup.initialItems
+        let previousItems = setupNeedsAttention ? setupItems : nil
+        settingUp = true; setupItems = previousItems ?? DependencySetup.initialItems
         apps = []; selected = []; lastScan = nil
         status = "Preparing update sources…"
         Task { [self] in
-            setupItems = await DependencySetup(runner: runner).prepare { [weak self] items in
+            setupItems = await DependencySetup(runner: runner, locate: setupLocate).prepare(retrying: previousItems) { [weak self] items in
                 await MainActor.run {
                     self?.setupItems = items
                     if let active = items.first(where: { $0.phase == .running }) { self?.status = active.message }

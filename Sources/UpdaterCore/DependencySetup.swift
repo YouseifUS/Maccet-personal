@@ -48,8 +48,13 @@ public struct DependencySetup {
         // Installer processes must finish; never kill a privileged installer on a timer.
         _ = try await command("/bin/bash", [Self.scriptURL.path] + arguments, timeout: nil)
     }
-    public func prepare(progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
-        var items = Self.initialItems
+    public func prepare(retrying previousItems: [SetupItem]? = nil, progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
+        // Reuse successful preparation only for an explicit retry in this session.
+        var items = Self.initialItems.map { initial in
+            guard let ready = previousItems?.first(where: { $0.id == initial.id && $0.phase == .ready }),
+                  initial.id == "tools" || locate(initial.id) != nil else { return initial }
+            return ready
+        }
         func report(_ index: Int, _ phase: SetupPhase, _ message: String) async {
             items[index].phase = phase; items[index].message = Diagnostics.redact(message)
             await progress(items)
@@ -65,50 +70,57 @@ public struct DependencySetup {
             for index in 1..<items.count { await report(index, .failed, "Waiting for Apple developer tools. Retry Setup after installation.") }
             return items
         }
-        var brew: String?
-        await report(1, .running, locate("brew") == nil ? "Downloading and installing Homebrew…" : "Updating Homebrew…")
-        do {
-            if locate("brew") == nil {
-                guard architecture == "arm64" else {
-                    throw UpdaterError("Homebrew's automatic package installer requires Apple Silicon. Install Homebrew from brew.sh on this Intel Mac, then Retry Setup.")
+        var brew: String? = items[1].phase == .ready ? locate("brew") : nil
+        if items[1].phase != .ready {
+            await report(1, .running, locate("brew") == nil ? "Downloading and installing Homebrew…" : "Updating Homebrew…")
+            do {
+                if locate("brew") == nil {
+                    guard architecture == "arm64" else {
+                        throw UpdaterError("Homebrew's automatic package installer requires Apple Silicon. Install Homebrew from brew.sh on this Intel Mac, then Retry Setup.")
+                    }
+                    try await installPackage(repository: "Homebrew/brew", tool: "brew")
                 }
-                try await installPackage(repository: "Homebrew/brew", tool: "brew")
-            }
-            guard let executable = locate("brew") else { throw UpdaterError("Homebrew installation finished but brew was not found in a supported location.") }
-            try await script(["brew-update", executable])
-            let version = try await command(executable, ["--version"])
-            brew = executable
-            await report(1, .ready, version.trimmingCharacters(in: .whitespacesAndNewlines))
-        } catch { await report(1, .failed, error.localizedDescription) }
+                guard let executable = locate("brew") else { throw UpdaterError("Homebrew installation finished but brew was not found in a supported location.") }
+                try await script(["brew-update", executable])
+                let version = try await command(executable, ["--version"])
+                brew = executable
+                await report(1, .ready, version.trimmingCharacters(in: .whitespacesAndNewlines))
+            } catch { await report(1, .failed, error.localizedDescription) }
+        }
 
-        await report(2, .running, locate("port") == nil ? "Downloading and installing MacPorts…" : "Updating MacPorts and its index…")
-        do {
-            if locate("port") == nil { try await installPackage(repository: "macports/macports-base", tool: "port") }
-            guard let executable = locate("port") else { throw UpdaterError("MacPorts installation finished but /opt/local/bin/port was not found.") }
-            try await script(["ports-update"])
-            let version = try await command(executable, ["version"])
-            await report(2, .ready, version.trimmingCharacters(in: .whitespacesAndNewlines))
-        } catch { await report(2, .failed, error.localizedDescription) }
+        if items[2].phase != .ready {
+            await report(2, .running, locate("port") == nil ? "Downloading and installing MacPorts…" : "Updating MacPorts and its index…")
+            do {
+                if locate("port") == nil { try await installPackage(repository: "macports/macports-base", tool: "port") }
+                guard let executable = locate("port") else { throw UpdaterError("MacPorts installation finished but /opt/local/bin/port was not found.") }
+                try await script(["ports-update"])
+                let version = try await command(executable, ["version"])
+                await report(2, .ready, version.trimmingCharacters(in: .whitespacesAndNewlines))
+            } catch { await report(2, .failed, error.localizedDescription) }
+        }
 
-        await report(3, .running, "Installing or updating the App Store helper…")
-        do {
-            // Keep an existing MacPorts-owned mas under that manager.
-            if locate("mas") == "/opt/local/bin/mas" {
-                guard items[2].phase == .ready else { throw UpdaterError("MacPorts setup must succeed before updating its mas helper.") }
-                try await script(["ports-mas-update"])
-            } else {
-                guard let brew else { throw UpdaterError("Homebrew setup must succeed before installing or updating mas.") }
-                let installed = try await runner.run(brew, ["list", "--formula", "--versions", "mas"], environment: environment, timeout: 30)
-                let action = installed.status == 0 && !installed.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "mas-update" : "mas-install"
-                try await script([action, brew])
-            }
-            guard let executable = locate("mas") else { throw UpdaterError("mas could not be found after installation.") }
-            let version = try await command(executable, ["version"])
-            guard let major = Int(version.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: ".").first ?? ""), major >= 7 else {
-                throw UpdaterError("mas 7 or later is required. The installed helper reported: " + version)
-            }
-            await report(3, .ready, "mas " + version.trimmingCharacters(in: .whitespacesAndNewlines))
-        } catch { await report(3, .failed, error.localizedDescription) }
+        if items[3].phase != .ready {
+            await report(3, .running, "Installing or updating the App Store helper…")
+            do {
+                // Keep an existing MacPorts-owned mas under that manager.
+                if locate("mas") == "/opt/local/bin/mas" {
+                    guard items[2].phase == .ready else { throw UpdaterError("MacPorts setup must succeed before updating its mas helper.") }
+                    try await script(["ports-mas-update"])
+                } else {
+                    guard let brew else { throw UpdaterError("Homebrew setup must succeed before installing or updating mas.") }
+                    let installed = try await runner.run(brew, ["list", "--formula", "--versions", "mas"], environment: environment, timeout: 30)
+                    let action = installed.status == 0 && !installed.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "mas-update" : "mas-install"
+                    try await script([action, brew])
+                }
+                guard let executable = locate("mas") else { throw UpdaterError("mas could not be found after installation.") }
+                let version = try await command(executable, ["version"])
+                guard let major = Int(version.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: ".").first ?? ""), major >= 7 else {
+                    throw UpdaterError("mas 7 or later is required. The installed helper reported: " + version)
+                }
+                await report(3, .ready, "mas " + version.trimmingCharacters(in: .whitespacesAndNewlines))
+            } catch { await report(3, .failed, error.localizedDescription) }
+        }
+
         return items
     }
 

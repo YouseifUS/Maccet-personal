@@ -365,6 +365,54 @@ private enum Checks {
             try expectThrows { try cache.removeAfterVerification(verified: true) }
             try expect(FileManager.default.fileExists(atPath: keep.path))
         }
+        await check("Cleanup rejects a replacement directory carrying a copied ownership marker") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let fm = FileManager.default
+            let cache = try OwnedUpdateCache(root: fixture.root.appendingPathComponent("Operations"))
+            let retained = fixture.root.appendingPathComponent("OriginalAttempt")
+            try fm.moveItem(at: cache.folder, to: retained)
+            try fm.copyItem(at: retained, to: cache.folder)
+            let keep = cache.folder.appendingPathComponent("Keep.txt")
+            try Data("replacement data".utf8).write(to: keep)
+            try expectThrows { try cache.removeAfterVerification(verified: true) }
+            try expect(fm.fileExists(atPath: keep.path) && fm.fileExists(atPath: retained.path))
+        }
+        await check("Cleanup rejects a replaced cache root even when the original attempt is moved back") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let fm = FileManager.default
+            let root = fixture.root.appendingPathComponent("Operations")
+            let cache = try OwnedUpdateCache(root: root)
+            let retained = fixture.root.appendingPathComponent("OriginalRoot")
+            try fm.moveItem(at: root, to: retained)
+            try fm.createDirectory(at: root, withIntermediateDirectories: false)
+            try fm.moveItem(at: retained.appendingPathComponent(cache.folder.lastPathComponent), to: cache.folder)
+            let keep = cache.folder.appendingPathComponent("Keep.txt")
+            try Data("retained data".utf8).write(to: keep)
+            try expectThrows { try cache.removeAfterVerification(verified: true) }
+            try expect(fm.fileExists(atPath: keep.path) && fm.fileExists(atPath: retained.path))
+        }
+        await check("A replaced cache is retained and cleanup failure does not undo verified success") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let fm = FileManager.default
+            let cacheRoot = fixture.root.appendingPathComponent("Cache")
+            let retained = fixture.root.appendingPathComponent("OriginalAttempt")
+            var replacement: URL?
+            let runner = try fixture.runner {
+                try fixture.write(version: "2.0", build: "20")
+                let attempts = try fm.contentsOfDirectory(at: cacheRoot.appendingPathComponent("Operations"), includingPropertiesForKeys: nil)
+                let folder = attempts[0]
+                try fm.moveItem(at: folder, to: retained)
+                try fm.copyItem(at: retained, to: folder)
+                try Data("replacement data".utf8).write(to: folder.appendingPathComponent("Keep.txt"))
+                replacement = folder
+            }
+            let engine = UpdateEngine(runner: runner, cacheRoot: cacheRoot, sourcePaths: [.homebrew: "/usr/bin/true"])
+            let result = await engine.execute(PlannedUpdate(app: try fixture.candidate(), preview: ""), cleanup: true) { _, _ in }
+            try expect(result.state == .succeeded && result.cleanupMessage?.contains("cleanup failed") == true)
+            guard let replacement else { throw CheckFailure(description: "Fixture installer did not run") }
+            try expect(fm.fileExists(atPath: replacement.appendingPathComponent("Keep.txt").path))
+            try expect(fm.fileExists(atPath: retained.path))
+        }
         await check("An installation failure retains the isolated operation cache") {
             let fixture = try Fixture(); defer { fixture.clean() }
             let runner = try fixture.runner { throw UpdaterError("Installer failed") }

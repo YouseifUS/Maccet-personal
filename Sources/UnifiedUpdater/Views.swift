@@ -50,10 +50,10 @@ struct ContentView: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 if !model.settingUp && model.setupNeedsAttention {
                     HStack {
-                        Label("Some update sources could not be prepared.", systemImage: "exclamationmark.circle")
+                        Label("Some update sources need attention. Open Sources for details.", systemImage: "exclamationmark.circle")
                         Spacer()
                         Button("View Setup") { model.screen = .sources }
-                        Button("Retry Setup", action: model.prepareSources).disabled(model.busy)
+                        Button(model.setupActionTitle, action: model.prepareSources).disabled(model.busy)
                     }.font(.callout).padding(14).background(Color.orange.opacity(0.08))
                 }
                 Divider()
@@ -184,14 +184,14 @@ struct ContentView: View {
     var setupResults: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Update source setup").font(.headline)
-                Text("Maccet reads your applications first, then prepares enabled sources that may be needed. macOS may ask for administrator permission. Application updates still require your review.")
+                Text("Source readiness and preparation").font(.headline)
+                Text("Opening Maccet checks source readiness. Choose Prepare Sources to install missing tools and refresh required sources; macOS may ask for administrator permission. Application updates require your review.")
                     .font(.callout).foregroundStyle(.secondary)
                 ForEach(model.setupItems) { item in
                     HStack(alignment: .top, spacing: 12) {
                         if item.phase == .running { ProgressView().controlSize(.small).frame(width: 20) }
-                        else { Image(systemName: item.phase == .ready ? "checkmark.circle.fill" : item.phase == .failed ? "exclamationmark.circle" : "circle")
-                            .foregroundStyle(item.phase == .failed ? Color.orange : item.phase == .ready ? accent : Color.secondary).frame(width: 20) }
+                        else { Image(systemName: item.phase == .ready ? "checkmark.circle.fill" : item.phase.needsAttention ? "exclamationmark.circle" : "circle")
+                            .foregroundStyle(item.phase.needsAttention ? Color.orange : item.phase == .ready ? accent : Color.secondary).frame(width: 20) }
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
                                 Text(item.title).font(.callout.weight(.medium))
@@ -202,11 +202,12 @@ struct ContentView: View {
                                 Text("Required for \(source.title)").font(.caption).foregroundStyle(.secondary)
                             }
                             Text(item.message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                            if let path = item.executablePath { Text(path).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true) }
                         }
                     }
                 }
                 if !model.settingUp {
-                    Button(model.setupNeedsAttention ? "Retry Setup" : "Prepare Sources Again", action: model.prepareSources).disabled(model.busy)
+                    Button(model.setupActionTitle, action: model.prepareSources).disabled(model.busy)
                 }
             }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -214,8 +215,8 @@ struct ContentView: View {
     var setupPage: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Text("Getting your update sources ready").font(.title2.weight(.semibold))
-                Text("Setup can take a few minutes. Keep Maccet open while installers finish.").foregroundStyle(.secondary)
+                Text(model.maintainingSources ? "Preparing update sources" : "Checking source readiness").font(.title2.weight(.semibold))
+                Text(model.maintainingSources ? "Setup can take a few minutes. Keep Maccet open while installers finish." : "Checking installed tools before scanning applications. Use Sources to install or maintain tools.").foregroundStyle(.secondary)
                 setupResults
             }.padding(26)
         }
@@ -344,7 +345,7 @@ struct ContentView: View {
                         Label("Inventory and history stay on this Mac.", systemImage: "lock.shield")
                         Label("Setup and checks contact GitHub, Homebrew, MacPorts, and Apple services.", systemImage: "network")
                         Label("Updates require your review. Apps are never force-quit.", systemImage: "hand.raised")
-                        Label("Sources are prepared automatically at launch; app updates require review.", systemImage: "checkmark.shield")
+                        Label("Launch checks source readiness. Source preparation starts from Sources; app updates require review.", systemImage: "checkmark.shield")
                         Text("Stores up to 1,000 recent update records. Background scheduling and vendor-specific updates are planned for a later release.").font(.caption).foregroundStyle(.secondary)
                     }.font(.callout).padding(12).frame(maxWidth: .infinity, alignment: .leading)
                 }

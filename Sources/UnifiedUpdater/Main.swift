@@ -73,14 +73,14 @@ struct DesktopApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var model: AppModel?
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let model = Self.model, model.updating || model.settingUp else { return .terminateNow }
+        guard let model = Self.model, model.updating || model.maintainingSources else { return .terminateNow }
         let alert = NSAlert()
-        alert.messageText = model.settingUp ? "Update sources are being prepared" : "An update queue is still running"
-        alert.informativeText = model.settingUp
+        alert.messageText = model.maintainingSources ? "Update sources are being prepared" : "An update queue is still running"
+        alert.informativeText = model.maintainingSources
             ? "Keep the app open until source setup finishes. You can cancel authorization in the macOS dialog. An active installer must finish before the app quits."
             : "Keep the app open until the active installer finishes. You can cancel the remaining apps and quit after the current operation completes."
         alert.addButton(withTitle: "Keep App Open")
-        if !model.settingUp { alert.addButton(withTitle: "Cancel Remaining") }
+        if !model.maintainingSources { alert.addButton(withTitle: "Cancel Remaining") }
         if alert.runModal() == .alertSecondButtonReturn { model.cancelRequested = true }
         return .terminateCancel
     }

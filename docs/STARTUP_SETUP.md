@@ -1,8 +1,14 @@
-# Automatic source setup — 0.1.2
+# Source readiness and explicit preparation — 0.1.2
 
-The GUI reads the configured application inventory first, then prepares applicable enabled sources and their required tools, once per app process. An update-source check follows preparation. Opening another window does not repeat setup. **Sources → Prepare Sources Again** recomputes inventory needs and prepares the applicable enabled sources; after a partial failure, **Retry Setup** retries unfinished preparation in the current session.
+The GUI reads the configured application inventory, checks readiness of applicable enabled source tools, and scans available sources once per app process. Opening another window does not repeat this sequence. Startup does not install tools, refresh indexes, upgrade helpers, download packages, or request authorization. **Sources → Prepare Sources** explicitly starts installation and maintenance. After partial preparation failure, **Retry Setup** retries unfinished preparation in the current session.
 
-## Startup sequence
+## Read-only readiness
+
+`DependencySetup.checkReadiness` shares applicability, dependency rules, version probes, and canonical path recording with explicit preparation. It only runs `xcode-select --print-path` and required tools' version commands, each with a 20-second timeout. The Apple-tools result describes whether a developer directory is selected; explicit preparation checks `clang` before maintenance. Launch avoids invoking developer-tool shims that may request installation. Missing tools show **Unavailable**, failed or incompatible version probes show **Failed**, and successful source tools expose their canonical path and reported version. Apple tools being unavailable does not hide working source tools. Disabled and unnecessary tools receive no commands. Readiness success does not claim the source index is fresh or reuse a previous maintenance result.
+
+The following application scan can contact source services and use the local MacPorts index. Inventory and working sources remain usable when other tools are unavailable. Choose **Prepare Sources** for installation, index refresh, and helper maintenance. The UI distinguishes this operation from readiness; quit protection applies during maintenance and application updates, while readiness checks can be closed normally.
+
+## Applicable tools
 
 Source switches apply to preparation as well as application checks. A disabled
 source is skipped unless its manager is required by the enabled App Store
@@ -27,13 +33,15 @@ retry, recomputes these needs; previously successful steps are reused only
 when still applicable. The later source check remains a separate operation
 and uses the same inventory-applicability rules.
 
+## Explicit preparation sequence
+
 1. Check Apple developer tools with `xcrun --find clang`. If missing, request Apple's installer using `xcode-select --install`. The system controls its download, license, and installation. Finish it and use **Retry Setup**; dependent work is paused until then.
 2. Find Homebrew under `/opt/homebrew/bin` or `/usr/local/bin`. When missing on Apple Silicon, download `Homebrew.pkg` from the latest official `Homebrew/brew` GitHub release, verify the release SHA-256 and Gatekeeper assessment, and install through macOS authorization. Run `brew update` as the logged-in user and check its version.
 3. Find MacPorts at `/opt/local/bin/port`. When missing, select exactly one package from the latest official `macports/macports-base` release whose OS major version matches this Mac. Verify SHA-256 and Gatekeeper before installing through macOS authorization. Run `port -N selfupdate` with administrator authorization and check its version.
 4. For an existing `/opt/local/bin/mas`, update only `mas` through MacPorts. Otherwise use Homebrew: `brew list --formula --versions mas` determines whether to run `brew install --formula mas` or `brew upgrade --formula mas`. Check that the helper reports version 7 or later.
 5. Show the result of each step, then scan applications using the available sources. A failed step does not turn its status into success or prevent an independent source from completing.
 
-`Sources/UpdaterCore/Resources/prepare-sources.sh` contains the fixed startup maintenance operations. `DependencySetup` drives prerequisite checks, release selection, downloads, verification, and progress. SwiftPM bundles the script, and the build script copies its resource bundle into the app. The distributed app does not depend on the source checkout or its build cache.
+`Sources/UpdaterCore/Resources/prepare-sources.sh` contains the fixed maintenance operations. `DependencySetup` drives prerequisite checks, release selection, downloads, verification, and progress. SwiftPM bundles the script, and the build script copies its resource bundle into the app. The distributed app does not depend on the source checkout or its build cache.
 
 ## Authorization and failure handling
 
@@ -41,7 +49,7 @@ macOS owns the administrator dialog. Maccet does not collect passwords. Authoriz
 
 Progress is step-based, without a download percentage. Failed and canceled steps show their diagnostic message in **Sources**. **Retry Setup** rechecks Apple developer tools and repeats failed or unfinished steps. A successful tool's `SetupItem` records its canonical executable path and reported version. Required cached tools must still resolve to that path and pass a fresh, read-only version command within 20 seconds; mas must still report version 7 or later. The current version replaces the previous observation. Missing tools, changed paths or symlink targets, failed commands, empty versions, and incompatible mas versions invalidate the cached success and enter normal preparation. If preparation cannot restore readiness, the step reports its error.
 
-Healthy tools retain their successful preparation without repeating maintenance, including a package manager required by a failed mas step. Disabled and unnecessary tools run no readiness probes. Success is reused only within the current session; **Prepare Sources Again** after a successful run and every new launch perform full preparation. There is no automatic retry loop. Offline launches can therefore show setup failures while local inventory and available sources remain usable.
+Healthy tools retain their successful preparation without repeating maintenance, including a package manager required by a failed mas step. Disabled and unnecessary tools run no readiness probes. Maintenance success is reused only for retry within the current session. The first explicit preparation after launch, and **Prepare Sources Again** after success, perform full applicable preparation. A launch readiness result never substitutes for maintenance. There is no automatic retry loop.
 
 Downloaded packages use a private per-attempt temporary directory and are removed when the attempt finishes. Packages are checked before authorization and rechecked by the authorized process immediately before installation. Missing release digests, foreign URLs, ambiguous packages, mismatched hashes, and rejected signatures block installation. Source tools may keep their normal metadata caches. Shared caches and installed app data are not deleted by startup.
 
@@ -53,13 +61,15 @@ An App Store account may still need to be signed in through Apple's own app. Xco
 
 Changing source switches affects app checks and the next preparation run; it does not interrupt an active installer. Disabled source steps do not count as setup failures. Installing an additional manager does not adopt existing applications or automatically expand verified ownership coverage.
 
-## Scope of automatic changes
+## Scope of explicit changes
 
-Startup updates the enabled source tools and their metadata, plus dependencies required to install/update those tools. It never invokes `brew upgrade` without the named `mas` formula, `port upgrade outdated`, application cask upgrades, or global cleanup. Inventory application upgrades continue through the existing explicit review queue.
+Explicit preparation updates the enabled source tools and their metadata, plus dependencies required to install/update those tools. It never invokes `brew upgrade` without the named `mas` formula, `port upgrade outdated`, application cask upgrades, or global cleanup. Inventory application upgrades continue through the existing explicit review queue.
 
 The diagnostic entry points `--inventory-json`, `--scan-json`, and `--check-startup-script` bypass GUI setup. The last command validates that the bundled startup script is readable and has valid shell syntax without installing or updating anything.
 
 ## Retry validation — 16 October 2026
+
+The historical validation sections below describe behavior at the time of each PR. Current launch and maintenance behavior is described above.
 
 Two regressions reproduced the old retry behavior by repeating the full setup
 call used by the GUI: **68 passed, 2 failed**. The retry API now receives the
@@ -191,7 +201,38 @@ MacPorts must execute successfully and report a nonempty version. Binary-signatu
 validation, broader compatibility policy, separation of startup detection from
 maintenance, and clean-machine acceptance remain open.
 
+## Readiness-only launch validation — 17 October 2026
+
+A controlled GUI regression failed because opening the app performed source
+maintenance. Startup now calls `checkReadiness`, then scans working sources.
+`Prepare Sources` calls the maintenance API explicitly; its first run cannot
+reuse a successful readiness probe as a successful maintenance result.
+Partial maintenance still offers `Retry Setup` and retains healthy work.
+
+`bash scripts/test.sh` passes **114 core checks** and
+`bash scripts/test-setup-retry.sh` passes **15 orchestration checks**. Coverage
+includes present/missing tools, read-only failures, incompatible mas, missing
+Apple tools with working sources, disabled and unnecessary sources, manager
+dependencies, repeated windows, a new launch, explicit maintenance, and recovery.
+Controlled commands exercise failure paths without installing or updating tools.
+
+The release build, packaging, local ad-hoc signature verification, and bundled
+startup-script check pass. An isolated unpublished UI copy passes **125 core**,
+**5 existing UI**, and **15 setup orchestration** checks. A fresh read-only
+inventory remains **112 apps** (34 third-party, 78 system-managed), with **0
+warnings**. The original checkout and installed applications remain untouched.
+
+Launch checks the selected Apple developer directory with `xcode-select
+--print-path`; compiler validation remains in explicit preparation. This avoids
+launching developer-tool shims on a machine without tools. Readiness does not
+certify a working compiler, a fresh source index, or current source metadata.
+Index refresh and helper upgrades still share the explicit preparation action;
+separate maintenance actions and clean-machine acceptance remain open in Phase C.
+
 ## References
+
+- [Apple developer-directory selection](https://developer.apple.com/documentation/xcode/configuring-command-line-tools-settings)
+- [Apple command-line tool shims and installation](https://developer.apple.com/library/archive/documentation/Xcode/Conceptual/RN-Xcode-Archive/Chapters/xc5_release_notes.html)
 
 - [Homebrew installation and package constraints](https://docs.brew.sh/Installation)
 - [Homebrew update and named formula operations](https://docs.brew.sh/Manpage)

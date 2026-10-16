@@ -1,12 +1,14 @@
 import Foundation
 
 public enum SetupPhase: String {
-    case waiting, running, ready, failed, disabled, notRequired
+    case waiting, running, ready, unavailable, failed, disabled, notRequired
+    public var needsAttention: Bool { self == .unavailable || self == .failed }
     public var title: String {
         switch self {
         case .waiting: return "Pending"
-        case .running: return "Preparing"
+        case .running: return "In progress"
         case .ready: return "Ready"
+        case .unavailable: return "Unavailable"
         case .failed: return "Failed"
         case .disabled: return "Disabled"
         case .notRequired: return "Not needed"
@@ -25,7 +27,7 @@ public struct SetupItem: Identifiable {
     public init(id: String, title: String) { self.id = id; self.title = title }
 }
 
-/// Runs once per GUI launch, before scanning. Diagnostics never enter this path.
+/// Separates read-only readiness checks from explicitly requested maintenance.
 public struct DependencySetup {
     public static var initialItems: [SetupItem] {
         [SetupItem(id: "tools", title: "Apple developer tools"),
@@ -75,6 +77,12 @@ public struct DependencySetup {
         return version
     }
     public func prepare(inventory: InventoryResult? = nil, disabledSources: Set<UpdateSource> = [], retrying previousItems: [SetupItem]? = nil, progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
+        await run(inventory: inventory, disabledSources: disabledSources, retrying: previousItems, prepareTools: true, progress: progress)
+    }
+    public func checkReadiness(inventory: InventoryResult? = nil, disabledSources: Set<UpdateSource> = [], progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
+        await run(inventory: inventory, disabledSources: disabledSources, retrying: nil, prepareTools: false, progress: progress)
+    }
+    private func run(inventory: InventoryResult?, disabledSources: Set<UpdateSource>, retrying previousItems: [SetupItem]?, prepareTools: Bool, progress: @escaping ([SetupItem]) async -> Void) async -> [SetupItem] {
         // Reuse successful preparation only for an explicit retry in this session.
         var items = Self.initialItems.map { initial in
             guard let ready = previousItems?.first(where: { $0.id == initial.id && $0.phase == .ready }) else { return initial }
@@ -135,6 +143,31 @@ public struct DependencySetup {
         if !needsMas { await skip(3, .appStore) }
         guard needsBrew || needsPorts else {
             await report(0, .notRequired, "No source requires developer tools for this inventory.")
+            return items
+        }
+        if !prepareTools {
+            await report(0, .running, "Checking Apple developer tools…")
+            do {
+                // Developer-tool shims can request installation when tools are
+                // absent. Read only the selected directory during launch checks.
+                let directory = try await command("/usr/bin/xcode-select", ["--print-path"], timeout: 20)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard directory.hasPrefix("/") else { throw UpdaterError("No developer tools directory is selected.") }
+                await report(0, .ready, "Developer tools directory is selected. Preparation checks the compiler before maintenance.")
+            } catch {
+                await report(0, .unavailable, "Apple developer tools are unavailable. Choose Prepare Sources to request Apple's installer. " + error.localizedDescription)
+            }
+            // A missing prerequisite must not hide the readiness of working tools.
+            // This path never installs, refreshes metadata, or requests authorization.
+            for (index, needed) in [(1, needsBrew), (2, needsPorts), (3, needsMas)] where needed {
+                guard let executable = locate(items[index].id) else {
+                    await report(index, .unavailable, "Not installed. Choose Prepare Sources to install this tool.")
+                    continue
+                }
+                await report(index, .running, "Checking \(items[index].title) readiness…")
+                do { try await confirmReady(index, executable: executable) }
+                catch { await report(index, .failed, error.localizedDescription) }
+            }
             return items
         }
         await report(0, .running, "Checking Apple developer tools…")

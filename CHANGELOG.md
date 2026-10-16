@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Launch checks source readiness without installing tools, refreshing indexes, or requesting authorization. Sources shows unavailable tools, canonical paths, versions, and failures; **Prepare Sources** starts installation and maintenance explicitly.
+- Readiness checks and scans preserve usable inventory when prerequisites are missing. Quit protection applies to active maintenance and update queues; partial preparation retains **Retry Setup**.
+
 ## 0.1.2 — 2026-10-16
 
 ### Added

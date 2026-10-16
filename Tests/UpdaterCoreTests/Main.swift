@@ -71,7 +71,10 @@ private final class SetupFixture {
     let digest = String(repeating: "a", count: 64)
     lazy var runner = FakeRunner { [unowned self] call in
         if call.executable == "/usr/bin/xcrun" { return CommandResult(status: self.toolsMissing ? 1 : 0, output: "/Developer/usr/bin/clang") }
-        if call.executable == "/usr/bin/xcode-select" { return CommandResult() }
+        if call.executable == "/usr/bin/xcode-select" {
+            if call.args == ["--print-path"] { return CommandResult(status: self.toolsMissing ? 1 : 0, output: "/Developer") }
+            return CommandResult()
+        }
         if call.executable == "/usr/bin/curl" {
             if let index = call.args.firstIndex(of: "--output") {
                 try Data("fixture package".utf8).write(to: URL(fileURLWithPath: call.args[index + 1]))
@@ -687,7 +690,62 @@ private enum Checks {
             let result = try await ProcessRunner().run("/usr/bin/printenv", ["PATH"], environment: [:], timeout: 5)
             try expect(result.status == 0 && result.output.contains("/opt/local/bin"))
         }
-        await check("Startup updates all three dependencies without upgrading applications") {
+        await check("Readiness checks report canonical tools and versions without maintenance") {
+            let fixture = SetupFixture()
+            let result = await fixture.service().checkReadiness()
+            try expect(result.allSatisfy { $0.phase == .ready } && fixture.actions.isEmpty)
+            for item in result.dropFirst() {
+                try expect(item.executablePath == ToolLocator.canonicalPath(fixture.paths[item.id]!) && item.version?.isEmpty == false)
+            }
+            try expect(fixture.runner.calls.count == 4 && fixture.runner.calls.allSatisfy { $0.timeout == 20 })
+        }
+        await check("All missing tools remain unavailable without downloading or launching installers") {
+            let fixture = SetupFixture(); fixture.paths = [:]; fixture.toolsMissing = true
+            let result = await fixture.service().checkReadiness()
+            try expect(result.allSatisfy { $0.phase == .unavailable && $0.phase.needsAttention })
+            try expect(fixture.runner.calls.count == 1 && fixture.runner.calls[0].executable == "/usr/bin/xcode-select" && fixture.runner.calls[0].args == ["--print-path"])
+        }
+        await check("Readiness still reports working source tools when Apple tools are unavailable") {
+            let fixture = SetupFixture(); fixture.toolsMissing = true
+            let result = await fixture.service().checkReadiness()
+            try expect(result[0].phase == .unavailable && result.dropFirst().allSatisfy { $0.phase == .ready })
+            try expect(fixture.runner.calls.count == 4 && fixture.actions.isEmpty)
+        }
+        await check("Readiness rejects an incompatible helper without trying to upgrade it") {
+            let fixture = SetupFixture(); fixture.masVersion = "6.0.0"
+            let result = await fixture.service().checkReadiness()
+            try expect(result[3].phase == .failed && result[3].message.contains("mas 7 or later") && result[3].version == nil)
+            try expect(result[1].phase == .ready && result[2].phase == .ready && fixture.actions.isEmpty)
+        }
+        await check("Failed read-only probes preserve independent tools without attempting repairs") {
+            let fixture = SetupFixture(); fixture.brokenTools = ["brew"]
+            let result = await fixture.service().checkReadiness()
+            try expect(result[1].phase == .failed && result[1].message.contains("Tool cannot start"))
+            try expect(result[2].phase == .ready && result[3].phase == .ready && fixture.actions.isEmpty)
+        }
+        await check("Readiness checks only the enabled relevant source") {
+            let fixture = SetupFixture(); fixture.paths = ["brew": "/opt/homebrew/bin/brew"]
+            let result = await fixture.service().checkReadiness(disabledSources: [.macPorts, .appStore])
+            try expect(result[1].phase == .ready && result[2].phase == .disabled && result[3].phase == .disabled)
+            try expect(fixture.runner.calls.count == 2 && fixture.actions.isEmpty)
+        }
+        await check("Readiness skips all commands for disabled sources or an empty inventory") {
+            for disabled in [false, true] {
+                let fixture = SetupFixture(); fixture.paths = [:]; fixture.toolsMissing = true
+                let result = await fixture.service().checkReadiness(inventory: disabled ? nil : AppInventory().discover(roots: []), disabledSources: disabled ? Set(UpdateSource.allCases) : [])
+                try expect(fixture.runner.calls.isEmpty && result[0].phase == .notRequired)
+                try expect(result.dropFirst().allSatisfy { $0.phase == (disabled ? .disabled : .notRequired) })
+            }
+        }
+        await check("Store-only readiness preserves the MacPorts helper dependency without maintenance") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            var inventory = AppInventory().discover(roots: [fixture.root.path]); inventory.apps[0].hasStoreReceipt = true
+            let setup = SetupFixture(); setup.paths["mas"] = "/opt/local/bin/mas"
+            let result = await setup.service().checkReadiness(inventory: inventory)
+            try expect(result[1].phase == .notRequired && result[2].dependencyFor == .appStore && result[3].phase == .ready)
+            try expect(setup.runner.calls.count == 3 && setup.actions.isEmpty)
+        }
+        await check("Explicit preparation updates all three dependencies without upgrading applications") {
             let fixture = SetupFixture()
             var snapshots: [[SetupItem]] = []
             let result = await fixture.service().prepare { snapshots.append($0) }

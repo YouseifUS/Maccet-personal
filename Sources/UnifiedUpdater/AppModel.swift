@@ -29,6 +29,8 @@ final class AppModel: ObservableObject {
     @Published var history: [ActivityRecord] = []
     @Published var lastScan: Date?
     @Published var settingUp = false
+    @Published private(set) var maintainingSources = false
+    @Published private(set) var setupWasPrepared = false
     @Published var setupItems = DependencySetup.initialItems
     private var startupStarted = false
     @Published var scanning = false
@@ -49,7 +51,8 @@ final class AppModel: ObservableObject {
     let runner: any CommandRunning
     private let setupLocate: (String) -> String?
     var busy: Bool { settingUp || scanning || preparing || updating }
-    var setupNeedsAttention: Bool { setupItems.contains { $0.phase == .failed } }
+    var setupNeedsAttention: Bool { setupItems.contains { $0.phase.needsAttention } }
+    var setupActionTitle: String { setupWasPrepared ? (setupNeedsAttention ? "Retry Setup" : "Prepare Sources Again") : "Prepare Sources" }
     var sourceChecksNeedAttention: Bool { sources.contains { !preferences.disabledSources.contains($0.source) && $0.needsAttention } }
     var eligible: [AppRecord] { apps.filter(preferences.isEligible) }
     var checkedCount: Int { apps.filter { $0.state.isChecked }.count }
@@ -96,28 +99,39 @@ final class AppModel: ObservableObject {
     func start() {
         guard !startupStarted else { return }
         startupStarted = true
-        prepareSources()
+        runSourceSetup(prepareTools: false)
     }
 
     func prepareSources() {
+        runSourceSetup(prepareTools: true)
+    }
+
+    private func runSourceSetup(prepareTools: Bool) {
         guard !busy else { return }
-        let previousItems = setupNeedsAttention ? setupItems : nil
+        let previousItems = prepareTools && setupWasPrepared && setupNeedsAttention ? setupItems : nil
         let prefs = preferences
+        maintainingSources = prepareTools; setupWasPrepared = prepareTools
         settingUp = true; setupItems = previousItems ?? DependencySetup.initialItems
         apps = []; selected = []; lastScan = nil
-        status = "Reading applications before source preparation…"
+        status = prepareTools ? "Reading applications before source preparation…" : "Reading applications before source readiness checks…"
         Task { [self] in
             let inventory = await Task.detached {
                 AppInventory().discover(roots: prefs.inventoryRoots, includeSystem: prefs.includeSystemApplications ?? true)
             }.value
             apps = inventory.apps; warnings = inventory.warnings
-            setupItems = await DependencySetup(runner: runner, locate: setupLocate).prepare(inventory: inventory, disabledSources: prefs.disabledSources, retrying: previousItems) { [weak self] items in
+            let progress: ([SetupItem]) async -> Void = { [weak self] items in
                 await MainActor.run {
                     self?.setupItems = items
                     if let active = items.first(where: { $0.phase == .running }) { self?.status = active.message }
                 }
             }
-            settingUp = false
+            let setup = DependencySetup(runner: runner, locate: setupLocate)
+            if prepareTools {
+                setupItems = await setup.prepare(inventory: inventory, disabledSources: prefs.disabledSources, retrying: previousItems, progress: progress)
+            } else {
+                setupItems = await setup.checkReadiness(inventory: inventory, disabledSources: prefs.disabledSources, progress: progress)
+            }
+            settingUp = false; maintainingSources = false
             // A canceled authorization or offline source must not hide usable sources.
             scan()
         }

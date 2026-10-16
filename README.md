@@ -18,13 +18,13 @@ For example, a verified Homebrew route and a verified MacPorts route can both be
 
 This release aggregates **installed-manager ownership results**, not the entire public catalogs of every manager. A matching catalog name cannot take over an existing application. Cross-catalog discovery and reviewed ownership transfer remain separate work.
 
-Every GUI launch automatically prepares Homebrew, MacPorts, and `mas` before checking applications: missing sources are installed and existing sources are refreshed. The progress screen shows each step; failures remain visible with **Retry Setup**, while available sources can still check apps. See [startup setup](docs/STARTUP_SETUP.md) for prerequisites, authorization, and platform limitations.
+Every GUI launch checks readiness of the applicable enabled source tools before checking applications. Missing tools appear as **Unavailable**; launch does not install tools, refresh their indexes, or request administrator authorization. Choose **Sources → Prepare Sources** to install missing tools and maintain required sources. Partial preparation failures offer **Retry Setup**, while available sources can still check apps. See [source readiness and preparation](docs/STARTUP_SETUP.md) for prerequisites, authorization, and platform limitations.
 
 Installing a manager does not make it the owner of existing direct-download applications. Coverage still depends on verified ownership; a missing or failed source cannot claim complete coverage.
 
 ## What this release does
 
-- Prepares the three source tools on every GUI launch with a bundled startup script, native authorization, and per-step results.
+- Checks source readiness on launch; explicit source preparation uses a bundled script, native authorization, and per-step results.
 - Scans `/Applications`, `~/Applications`, standard system application folders, and folders you select.
 - Includes hidden application links such as Safari without descending into app helpers or hidden non-app directories.
 - Reads bundles without launching them, excludes nested helpers, and removes the old arbitrary folder-depth limit.
@@ -52,13 +52,13 @@ Installing a manager does not make it the owner of existing direct-download appl
 - `mas` 7+ under `/opt/homebrew/bin`, `/usr/local/bin`, or `/opt/local/bin` for identity-based store checks.
 - A suitable App Store account and any required macOS authorization for store updates.
 
-The GUI automatically installs and updates these dependencies. Fresh automatic Homebrew installation currently requires Apple Silicon; Intel users must install Homebrew once using its official instructions. Missing Apple developer tools open Apple's system installer; finish that installer and choose **Retry Setup**. Installer availability and upstream OS support can further limit setup on older macOS versions. Inventory and available sources remain usable if setup fails. Official instructions: [Homebrew](https://docs.brew.sh/Installation), [MacPorts](https://www.macports.org/install.php), and [mas](https://github.com/mas-cli/mas).
+Choose **Sources → Prepare Sources** to install and update these dependencies. Fresh automatic Homebrew installation currently requires Apple Silicon; Intel users must install Homebrew once using its official instructions. During explicit preparation, missing Apple developer tools open Apple's system installer; finish that installer and choose **Retry Setup**. Installer availability and upstream OS support can further limit setup on older macOS versions. Inventory and available sources remain usable if setup fails. Official instructions: [Homebrew](https://docs.brew.sh/Installation), [MacPorts](https://www.macports.org/install.php), and [mas](https://github.com/mas-cli/mas).
 
 ## Run the app
 
 Build with the script below, then open `dist/Unified Updater.app`. The included binary archive is built for the architecture stated in its filename.
 
-1. Wait for automatic source setup. Complete any macOS authorization or Apple developer tools installation; choose **Retry Setup** if requested. Open **Sources** to review results.
+1. Wait for source readiness checks and the initial application scan. Open **Sources** to inspect results. Choose **Prepare Sources** when tools need installation or maintenance, complete any macOS authorization, and use **Retry Setup** after a preparation failure.
 2. Review application folders in **Settings**.
 3. Click **Check for Updates**.
 4. Inspect coverage and select **Review Update**, **Update Selected**, or **Update All**.
@@ -66,7 +66,7 @@ Build with the script below, then open `dist/Unified Updater.app`. The included 
 6. Save your work, close the applications, and choose **Start Updates**. Optionally request a normal quit for running apps.
 7. Inspect **Activity** and **Cleanup** for results.
 
-Launch setup installs or updates the source tools themselves, including `mas` and required tool dependencies. Updates to applications in your inventory require your reviewed update plan. Read-only diagnostic commands and scans do not run source setup. Update All uses an explicit list of eligible apps, regardless of search filters; the App Store screen restricts its Update All action to store apps. Authentication can be canceled in the system dialog.
+Explicit source preparation installs or updates the source tools themselves, including `mas` and required tool dependencies. Updates to applications in your inventory require your reviewed update plan. Launch readiness checks, diagnostic commands, and scans do not run source maintenance. Update All uses an explicit list of eligible apps, regardless of search filters; the App Store screen restricts its Update All action to store apps. Authentication can be canceled in the system dialog.
 
 ## Screens
 
@@ -77,7 +77,7 @@ Launch setup installs or updates the source tools themselves, including `mas` an
 | App Store | Store inventory and update actions using the same shared queue |
 | Activity | Live task stages, persisted update attempts, verification and failure explanations, rescan before retry |
 | Cleanup | Cleanup policy and per-attempt results; no broad delete action |
-| Sources | Startup setup results, retry, availability, tool version, errors, scan enable/disable, and documentation |
+| Sources | Readiness and explicit preparation results, retry, canonical paths, versions, errors, scan enable/disable, and documentation |
 | Settings | Application folders, exclusion reset, and privacy/behavior information |
 
 Right-click an app for details, Reveal in Finder, Ignore App, or Skip This Release. **Show ignored** reveals excluded entries; **Settings → Reset All Exclusions** restores them.
@@ -96,7 +96,7 @@ Shared Homebrew caches, general app caches, user preferences, licenses, and docu
 
 **Cancel Remaining** cancels queued work and prevents installation when cancellation arrives before the install stage. An active installation is allowed to finish safely; it is not forcibly terminated. Independent failures do not stop the rest of a valid queue. macOS may show an authorization dialog for each store update.
 
-MacPorts checks use the existing local ports index; the UI labels that limitation. GUI launch setup runs `port -N selfupdate` with macOS authorization before scanning. Diagnostic scans only use the existing local index. An update preview uses `port -y -N upgrade <name>`; the reviewed installation uses one named package and may update required dependencies shown in the preview. macOS authorization is requested for the standard root-owned installation. Shared MacPorts caches and inactive versions are retained. Revision-only and incomparable vendor changes require manual verification.
+MacPorts checks use the existing local ports index; the UI labels that limitation. **Prepare Sources** runs `port -N selfupdate` with macOS authorization before rescanning. Launch and diagnostic scans use the existing local index. An update preview uses `port -y -N upgrade <name>`; the reviewed installation uses one named package and may update required dependencies shown in the preview. macOS authorization is requested for the standard root-owned installation. Shared MacPorts caches and inactive versions are retained. Revision-only and incomparable vendor changes require manual verification.
 
 ## Build from source
 
@@ -143,7 +143,7 @@ Default storage: `~/Library/Application Support/UnifiedUpdater/`.
 - `history.json`: up to 1,000 recent update records.
 - `SourceCache/`: source metadata and isolated update attempts.
 
-Startup setup contacts GitHub, Homebrew, MacPorts, and Apple services to obtain and verify dependencies. Application checks contact source services. There is no analytics service or separate inventory-upload backend. Reports are exported only to a location you choose. Diagnostic strings redact home paths and common credential-bearing URL values; review any report before sharing it.
+Explicit source preparation contacts GitHub, Homebrew, MacPorts, and Apple services to obtain and verify dependencies. Application checks contact source services. There is no analytics service or separate inventory-upload backend. Reports are exported only to a location you choose. Diagnostic strings redact home paths and common credential-bearing URL values; review any report before sharing it.
 
 If the app closes during an operation, active history entries become **Interrupted** on next launch. No operation is automatically retried and no artifacts are automatically deleted during recovery. Rescan first to inspect the installed state.
 

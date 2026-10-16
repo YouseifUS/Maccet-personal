@@ -7,13 +7,15 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
 }
 private final class SetupRunner: CommandRunning {
     var failPorts = true
+    var toolsMissing = false
     var masVersion = "7.0.0"
     var actions: [String] = []
     var calls = 0
     var beforeSetup: (@MainActor () throws -> Void)?
     func run(_ executable: String, _ arguments: [String], environment: [String: String], timeout: TimeInterval?) async throws -> CommandResult {
         calls += 1
-        if executable == "/usr/bin/xcrun" { try await beforeSetup?(); return CommandResult(output: "/usr/bin/clang") }
+        if executable == "/usr/bin/xcode-select", arguments == ["--print-path"] { return CommandResult(status: toolsMissing ? 1 : 0, output: "/Developer") }
+        if executable == "/usr/bin/xcrun" { try await beforeSetup?(); return CommandResult(status: toolsMissing ? 1 : 0, output: "/usr/bin/clang") }
         if executable == "/bin/bash", arguments.count > 1 {
             let action = arguments[1]; actions.append(action)
             return CommandResult(status: action == "ports-update" && failPorts ? 1 : 0, errorOutput: "Controlled source failure")
@@ -65,9 +67,35 @@ private final class SetupRunner: CommandRunning {
                 model.preferences.scanRoots = [applications.path]; model.preferences.includeSystemApplications = false
                 return model
             }
+            let startup = session()
+            startup.start()
+            try expect(startup.settingUp && !startup.maintainingSources, "Readiness detection was marked as active maintenance")
+            try await wait(startup)
+            try expect(runner.actions.isEmpty, "Opening the app performed source maintenance instead of checking readiness")
+            try expect(startup.lastScan != nil && startup.setupItems.allSatisfy { $0.phase == .ready }, "Readiness checks did not preserve application scanning")
+            print("PASS Opening the app checks readiness without maintenance")
+            let beforeSecondWindow = runner.calls
+            startup.start(); try await wait(startup)
+            try expect(runner.calls == beforeSecondWindow && startup.setupActionTitle == "Prepare Sources", "Another window repeated startup or offered a retry before preparation")
+            print("PASS Another window does not repeat readiness or maintenance")
+            let missingRunner = SetupRunner(); missingRunner.toolsMissing = true
+            let missing = AppModel(runner: missingRunner, setupLocate: { _ in nil })
+            missing.preferences.scanRoots = [applications.path]; missing.preferences.includeSystemApplications = false
+            missing.start(); try await wait(missing)
+            try expect(missing.setupItems.allSatisfy { $0.phase == .unavailable } && missing.setupNeedsAttention, "Missing launch tools were not reported as unavailable")
+            try expect(missingRunner.actions.isEmpty && missing.lastScan != nil && missing.apps.count == 2 && missing.error == nil, "Missing tools started installation or prevented inventory and scanning")
+            print("PASS Missing launch tools preserve inventory and require explicit preparation")
+            let missingApple = AppModel(runner: missingRunner, setupLocate: { paths[$0] })
+            missingApple.preferences.scanRoots = [applications.path]; missingApple.preferences.includeSystemApplications = false
+            missingApple.start(); try await wait(missingApple)
+            try expect(missingApple.setupItems[0].phase == .unavailable && missingApple.setupItems.dropFirst().allSatisfy { $0.phase == .ready }, "Missing Apple tools hid working sources")
+            try expect(missingRunner.actions.isEmpty && missingApple.lastScan != nil, "Apple-tools readiness requested maintenance")
+            print("PASS Missing Apple tools do not hide working source tools")
             let model = session()
             runner.beforeSetup = { try expect(model.apps.count == 2, "Preparation ran before inventory was published") }
-            model.start(); try await wait(model)
+            model.prepareSources()
+            try expect(model.maintainingSources, "Explicit preparation was not marked as active maintenance")
+            try await wait(model)
             runner.beforeSetup = nil
             try expect(model.setupItems[1].phase == .ready && model.setupItems[2].phase == .failed && model.setupItems[3].phase == .ready, "Partial setup result was lost")
             print("PASS Partial source failure remains visible")
@@ -83,8 +111,10 @@ private final class SetupRunner: CommandRunning {
 
             let fresh = session()
             fresh.start(); try await wait(fresh)
+            try expect(runner.actions.count == 4 && fresh.setupActionTitle == "Prepare Sources", "A new launch performed maintenance or reused a preparation result")
+            fresh.prepareSources(); try await wait(fresh)
             try expect(Array(runner.actions.suffix(3)) == ["brew-update", "ports-update", "mas-update"] && runner.actions.count == 7, "A fresh session reused previous setup success")
-            print("PASS A fresh session runs full preparation")
+            print("PASS A fresh session checks readiness and explicitly requested preparation runs in full")
             let disabled = session()
             disabled.preferences.disabledSources = Set(UpdateSource.allCases)
             let callsBefore = runner.calls
@@ -95,7 +125,7 @@ private final class SetupRunner: CommandRunning {
             let homebrewOnly = session()
             homebrewOnly.preferences.disabledSources = [.macPorts, .appStore]
             let actionsBefore = runner.actions.count
-            homebrewOnly.start(); try await wait(homebrewOnly)
+            homebrewOnly.prepareSources(); try await wait(homebrewOnly)
             try expect(runner.actions.count == actionsBefore + 1 && runner.actions.last == "brew-update", "Single-source settings were not passed to preparation")
             try expect(homebrewOnly.setupItems[2].phase == .disabled && homebrewOnly.setupItems[3].phase == .disabled && !homebrewOnly.setupNeedsAttention, "Disabled steps were presented as failures")
             print("PASS GUI setup prepares only the enabled source")
@@ -112,14 +142,14 @@ private final class SetupRunner: CommandRunning {
             let storeOnly = session()
             storeOnly.preferences.scanRoots = [applications.appendingPathComponent("Store.app").path]
             let beforeStore = runner.actions.count
-            storeOnly.start(); try await wait(storeOnly)
+            storeOnly.prepareSources(); try await wait(storeOnly)
             try expect(Array(runner.actions.dropFirst(beforeStore)) == ["brew-update", "mas-update"], "Store-only inventory prepared unrelated managers")
             try expect(storeOnly.setupItems[1].dependencyFor == .appStore && storeOnly.setupItems[2].phase == .notRequired, "Store helper dependency was not distinguished")
             print("PASS Store-only inventory prepares only its helper route")
             let directOnly = session()
             directOnly.preferences.scanRoots = [applications.appendingPathComponent("Direct.app").path]
             let beforeDirect = runner.actions.count
-            directOnly.start(); try await wait(directOnly)
+            directOnly.prepareSources(); try await wait(directOnly)
             try expect(Array(runner.actions.dropFirst(beforeDirect)) == ["brew-update", "ports-update"] && directOnly.setupItems[3].phase == .notRequired, "Non-store inventory prepared mas")
             print("PASS Non-store inventory skips the App Store helper")
             directOnly.sources = [SourceHealth(source: .appStore, message: "Not needed", checkRequired: false)]
@@ -128,7 +158,7 @@ private final class SetupRunner: CommandRunning {
             print("PASS Changed scan settings invalidate skipped source checks")
             runner.failPorts = true
             let changedHelper = session()
-            changedHelper.start(); try await wait(changedHelper)
+            changedHelper.prepareSources(); try await wait(changedHelper)
             runner.failPorts = false; runner.masVersion = "6.0.0"
             let beforeHelperRetry = runner.actions.count
             changedHelper.prepareSources(); try await wait(changedHelper)
@@ -141,7 +171,7 @@ private final class SetupRunner: CommandRunning {
             try expect(!changedHelper.setupNeedsAttention && changedHelper.setupItems[3].version == "7.1.0", "GUI retained stale readiness after helper recovery")
             try expect(Array(runner.actions.dropFirst(beforeRecovery)) == ["mas-update"] && changedHelper.lastScan != nil, "Helper recovery repeated successful manager maintenance")
             print("PASS GUI helper recovery clears attention without repeating healthy managers")
-            print("\n11 setup orchestration checks passed; 0 failed.")
+            print("\n15 setup orchestration checks passed; 0 failed.")
         } catch {
             FileHandle.standardError.write(Data("FAIL \(error)\n".utf8)); exit(1)
         }

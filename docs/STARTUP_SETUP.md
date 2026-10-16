@@ -39,7 +39,9 @@ and uses the same inventory-applicability rules.
 
 macOS owns the administrator dialog. Maccet does not collect passwords. Authorization can be canceled in that dialog. An active privileged installer is allowed to finish; closing Maccet during source preparation is blocked to avoid abandoning it. Source maintenance is serialized with application scans and updates.
 
-Progress is step-based, without a download percentage. Failed and canceled steps show their diagnostic message in **Sources**. **Retry Setup** rechecks Apple developer tools and repeats failed or unfinished steps, retaining successful source preparation while those tools can still be located. A previously ready tool that disappeared is prepared again. A ready Homebrew or MacPorts tool remains available to a failed mas step without repeating the manager's maintenance. Ready results remain visible during the retry. Success is reused only within the current session; **Prepare Sources Again** after a successful run and every new launch perform full preparation. There is no automatic retry loop. Offline launches can therefore show setup failures while local inventory and available sources remain usable.
+Progress is step-based, without a download percentage. Failed and canceled steps show their diagnostic message in **Sources**. **Retry Setup** rechecks Apple developer tools and repeats failed or unfinished steps. A successful tool's `SetupItem` records its canonical executable path and reported version. Required cached tools must still resolve to that path and pass a fresh, read-only version command within 20 seconds; mas must still report version 7 or later. The current version replaces the previous observation. Missing tools, changed paths or symlink targets, failed commands, empty versions, and incompatible mas versions invalidate the cached success and enter normal preparation. If preparation cannot restore readiness, the step reports its error.
+
+Healthy tools retain their successful preparation without repeating maintenance, including a package manager required by a failed mas step. Disabled and unnecessary tools run no readiness probes. Success is reused only within the current session; **Prepare Sources Again** after a successful run and every new launch perform full preparation. There is no automatic retry loop. Offline launches can therefore show setup failures while local inventory and available sources remain usable.
 
 Downloaded packages use a private per-attempt temporary directory and are removed when the attempt finishes. Packages are checked before authorization and rechecked by the authorized process immediately before installation. Missing release digests, foreign URLs, ambiguous packages, mismatched hashes, and rejected signatures block installation. Source tools may keep their normal metadata caches. Shared caches and installed app data are not deleted by startup.
 
@@ -164,6 +166,30 @@ installed applications were not changed.
 
 This distinguishes source-check applicability from tool presence. Canonical
 tool/version readiness details and clean-machine acceptance remain open.
+
+## Cached readiness validation — 17 October 2026
+
+Three regressions reproduced stale retry readiness: **98 passed, 3 failed**.
+A relocated Homebrew, a failing MacPorts executable, and a downgraded mas had
+all retained their previous Ready results. After the fix,
+`bash scripts/test.sh` passes **106 core checks** and
+`bash scripts/test-setup-retry.sh` passes **11 orchestration checks**.
+Additional cases cover symlink retargeting, canonical aliases, current version
+reporting, bounded probes, empty responses, disabled sources, and helper recovery
+without repeating healthy manager maintenance. Commands use controlled runners;
+no tools or applications are updated by these tests.
+
+The PR release build, packaging, local ad-hoc signature verification, and bundled
+startup-script check pass. A fresh read-only inventory remains at **112 apps**
+(34 third-party, 78 system-managed), with **0 warnings**. The isolated unpublished
+UI snapshot passes **117 core**, **5 existing UI**, and **11 setup orchestration**
+checks. The original checkout remains untouched.
+
+This verifies current canonical location and reported version before reusing
+preparation. The minimum-version policy remains mas 7 or later; Homebrew and
+MacPorts must execute successfully and report a nonempty version. Binary-signature
+validation, broader compatibility policy, separation of startup detection from
+maintenance, and clean-machine acceptance remain open.
 
 ## References
 

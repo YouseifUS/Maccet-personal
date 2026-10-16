@@ -7,6 +7,7 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
 }
 private final class SetupRunner: CommandRunning {
     var failPorts = true
+    var masVersion = "7.0.0"
     var actions: [String] = []
     var calls = 0
     var beforeSetup: (@MainActor () throws -> Void)?
@@ -18,7 +19,7 @@ private final class SetupRunner: CommandRunning {
             return CommandResult(status: action == "ports-update" && failPorts ? 1 : 0, errorOutput: "Controlled source failure")
         }
         if arguments == ["--version"] { return CommandResult(output: "Homebrew 7.0.9") }
-        if arguments == ["version"] { return CommandResult(output: "7.0.0") }
+        if arguments == ["version"] { return CommandResult(output: executable == "/opt/homebrew/bin/mas" ? masVersion : "7.0.0") }
         if arguments == ["list", "--formula", "--versions", "mas"] { return CommandResult(output: "mas 7.0.0") }
         if arguments.first == "info" || arguments.first == "outdated" && arguments.contains("--cask") {
             return CommandResult(output: #"{"casks":[]}"#)
@@ -125,7 +126,22 @@ private final class SetupRunner: CommandRunning {
             directOnly.invalidateInventory()
             try expect(directOnly.sources[0].checkRequired == nil && directOnly.sourceChecksNeedAttention && directOnly.lastScan == nil, "Changed scan settings retained a stale unnecessary-source decision")
             print("PASS Changed scan settings invalidate skipped source checks")
-            print("\n9 setup orchestration checks passed; 0 failed.")
+            runner.failPorts = true
+            let changedHelper = session()
+            changedHelper.start(); try await wait(changedHelper)
+            runner.failPorts = false; runner.masVersion = "6.0.0"
+            let beforeHelperRetry = runner.actions.count
+            changedHelper.prepareSources(); try await wait(changedHelper)
+            try expect(changedHelper.setupItems[3].phase == .failed && changedHelper.setupNeedsAttention, "GUI reused an incompatible helper's ready result")
+            try expect(changedHelper.setupItems[3].message.contains("mas 7 or later") && Array(runner.actions.dropFirst(beforeHelperRetry)) == ["ports-update", "mas-update"], "GUI did not repair the stale helper independently")
+            print("PASS GUI retry invalidates a previously ready incompatible helper")
+            runner.masVersion = "7.1.0"
+            let beforeRecovery = runner.actions.count
+            changedHelper.prepareSources(); try await wait(changedHelper)
+            try expect(!changedHelper.setupNeedsAttention && changedHelper.setupItems[3].version == "7.1.0", "GUI retained stale readiness after helper recovery")
+            try expect(Array(runner.actions.dropFirst(beforeRecovery)) == ["mas-update"] && changedHelper.lastScan != nil, "Helper recovery repeated successful manager maintenance")
+            print("PASS GUI helper recovery clears attention without repeating healthy managers")
+            print("\n11 setup orchestration checks passed; 0 failed.")
         } catch {
             FileHandle.standardError.write(Data("FAIL \(error)\n".utf8)); exit(1)
         }

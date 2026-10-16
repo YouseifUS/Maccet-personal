@@ -27,12 +27,16 @@ public final class ProcessRunner: CommandRunning {
                 do {
                     // Files avoid pipe deadlocks when both output streams are busy.
                     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("unified-updater-" + UUID().uuidString)
-                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    // Raw output can contain credentials before diagnostic redaction.
+                    // Create a new private directory and files before starting the child.
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
                     defer { try? FileManager.default.removeItem(at: folder) }
                     let out = folder.appendingPathComponent("stdout")
                     let err = folder.appendingPathComponent("stderr")
-                    FileManager.default.createFile(atPath: out.path, contents: nil)
-                    FileManager.default.createFile(atPath: err.path, contents: nil)
+                    guard FileManager.default.createFile(atPath: out.path, contents: nil, attributes: [.posixPermissions: 0o600]),
+                          FileManager.default.createFile(atPath: err.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
+                        throw UpdaterError("Could not create private process output files. The command was not started.")
+                    }
                     let outHandle = try FileHandle(forWritingTo: out)
                     let errHandle = try FileHandle(forWritingTo: err)
                     defer { try? outHandle.close(); try? errHandle.close() }

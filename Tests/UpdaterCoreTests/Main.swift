@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import UpdaterCore
 
 private struct CheckFailure: Error, CustomStringConvertible { var description: String }
@@ -120,6 +121,20 @@ private final class SetupFixture {
 @main
 private enum Checks {
     static func main() async {
+        if CommandLine.arguments.contains("--inspect-output-permissions") {
+            var paths: [String] = []
+            for descriptor in [STDOUT_FILENO, STDERR_FILENO] {
+                var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+                guard fcntl(descriptor, F_GETPATH, &path) != -1 else { exit(2) }
+                paths.append(String(cString: path))
+            }
+            let locations = [URL(fileURLWithPath: paths[0]).deletingLastPathComponent().path] + paths
+            for path in locations {
+                guard let attributes = try? FileManager.default.attributesOfItem(atPath: path), let mode = attributes[.posixPermissions] as? NSNumber else { exit(2) }
+                print(String(mode.intValue & 0o777, radix: 8))
+            }
+            return
+        }
         var passed = 0
         var failures: [String] = []
         func check(_ name: String, _ action: () async throws -> Void) async {
@@ -561,6 +576,19 @@ private enum Checks {
             let result = try await ProcessRunner().run("/bin/sh", ["-c", "printf hello; printf error >&2; exit 7"], environment: [:], timeout: 5)
             try expect(result.status == 7 && result.output == "hello" && result.errorOutput == "error")
             try expectThrows { _ = try result.checked() }
+        }
+        await check("Captured output is private under permissive and restrictive process masks") {
+            // These checks run serially; restore the process-wide test mask even
+            // if the assertion fails. No production code changes the user's mask.
+            let originalMask = umask(0o000)
+            defer { umask(originalMask) }
+            let masks: [mode_t] = [0o000, 0o022, 0o077]
+            for mask in masks {
+                umask(mask)
+                let result = try await ProcessRunner().run(URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.path, ["--inspect-output-permissions"], environment: [:], timeout: 5)
+                try expect(result.status == 0)
+                try expect(result.output.split(whereSeparator: \.isNewline).map(String.init) == ["700", "600", "600"], "Raw process capture was not private under mask " + String(mask, radix: 8))
+            }
         }
         await check("Read-only commands have a bounded timeout") {
             do {

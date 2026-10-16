@@ -24,7 +24,8 @@ Any inventory warning, or an API caller omitting inventory, keeps conservative
 enabled-source preparation because missing metadata cannot prove a source
 unnecessary. Warnings remain visible. Every preparation attempt, including
 retry, recomputes these needs; previously successful steps are reused only
-when still applicable. The later source check remains an independent step.
+when still applicable. The later source check remains a separate operation
+and uses the same inventory-applicability rules.
 
 1. Check Apple developer tools with `xcrun --find clang`. If missing, request Apple's installer using `xcode-select --install`. The system controls its download, license, and installation. Finish it and use **Retry Setup**; dependent work is paused until then.
 2. Find Homebrew under `/opt/homebrew/bin` or `/usr/local/bin`. When missing on Apple Silicon, download `Homebrew.pkg` from the latest official `Homebrew/brew` GitHub release, verify the release SHA-256 and Gatekeeper assessment, and install through macOS authorization. Run `brew update` as the logged-in user and check its version.
@@ -130,6 +131,39 @@ Swift 6.4. No installed applications or source tools were maintained.
 This adds conservative applicability filtering for preparation. Exact package
 ownership checks, richer readiness reporting, and clean-machine acceptance
 remain separate requirements; preparation does not establish update coverage.
+
+## Source-check applicability — 16 October 2026
+
+Preparation and update checks share `InventoryResult.applicableSources`.
+Complete empty/system-only inventories run no source commands. Store-only
+inventories check App Store without querying package managers; non-store
+inventories skip App Store. Inventory warnings keep all enabled sources
+applicable, and disabled settings always take precedence.
+
+`SourceHealth.checkRequired` records whether the current inventory needs the
+check. A skipped source is displayed as **Not needed**, independently of
+whether its tool is installed. Required missing or failed tools still produce
+attention, and skipped checks never mark an application current. Changing
+scan settings invalidates the old applicability decision until a new scan.
+The optional field is backward compatible: older reports decode with unknown
+applicability and retain conservative attention behavior.
+
+Two regressions failed before the fix: **90 passed, 2 failed**. After the fix,
+`bash scripts/test.sh` passes **98 checks** and
+`bash scripts/test-setup-retry.sh` passes **9 orchestration checks**. Cases
+cover unnecessary installed/missing tools, store-only and non-store inventories,
+required failures, incomplete inventory, disabled settings, old-report decoding,
+and changed scan settings. These checks use controlled commands and fixtures.
+
+The PR release build, packaging, local ad-hoc signature verification, and
+bundled startup-script syntax check pass. A fresh read-only inventory contains
+112 apps with no warnings. An isolated unpublished UI snapshot passes
+109 core, 5 existing UI, and 9 setup orchestration checks; its attention and
+source badges were adapted for applicability. The original checkout and
+installed applications were not changed.
+
+This distinguishes source-check applicability from tool presence. Canonical
+tool/version readiness details and clean-machine acceptance remain open.
 
 ## References
 

@@ -121,12 +121,12 @@ struct ContentView: View {
                 MetricCard(title: "READY TO UPDATE", value: model.lastScan == nil && !model.scanning ? "—" : "\(updateAllCandidates.count)", subtitle: "Eligible, non-ignored apps", symbol: "arrow.up.circle", highlighted: true)
                 MetricCard(title: "CHECK COVERAGE", value: model.lastScan == nil && !model.scanning ? "—" : "\(model.checkedCount)/\(model.checkableCount)", subtitle: "Third-party apps · \(model.systemAppCount) managed by macOS", symbol: "checkmark.shield")
             }.padding(24)
-            if !model.warnings.isEmpty || model.sources.contains(where: { $0.error != nil }) {
+            if !model.warnings.isEmpty || model.sourceChecksNeedAttention {
                 HStack(alignment: .top) {
                     Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Some checks need attention").font(.callout.weight(.medium))
-                        Text((model.warnings + model.sources.compactMap { $0.error == nil ? nil : "\($0.source.title): check incomplete" }).joined(separator: " · "))
+                        Text((model.warnings + model.sources.filter { !model.preferences.disabledSources.contains($0.source) && $0.needsAttention }.map { "\($0.source.title): \($0.available ? "check incomplete" : "tool missing")" }).joined(separator: " · "))
                             .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                     }
                     Spacer()
@@ -234,7 +234,7 @@ struct ContentView: View {
                                     Text(source.version.isEmpty ? "Optional integration" : source.version).font(.caption).foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                StatusPill(title: model.preferences.disabledSources.contains(source.source) ? "Disabled" : source.error != nil ? "Needs attention" : source.available ? "Available" : "Missing", color: source.error != nil ? .orange : source.available ? accent : .secondary)
+                                StatusPill(title: model.preferences.disabledSources.contains(source.source) ? "Disabled" : source.checkRequired == false ? "Not needed" : source.error != nil ? "Needs attention" : source.available ? "Available" : "Missing", color: model.preferences.disabledSources.contains(source.source) || source.checkRequired == false ? .secondary : source.needsAttention ? .orange : accent)
                             }
                             Text(source.message).foregroundStyle(.secondary)
                             if let path = source.executable { Text(path).font(.caption.monospaced()).textSelection(.enabled) }

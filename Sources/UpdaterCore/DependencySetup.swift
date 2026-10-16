@@ -76,14 +76,7 @@ public struct DependencySetup {
         }
         // Missing metadata cannot prove a source unnecessary. Preserve the
         // conservative enabled-source behavior for incomplete or absent inventory.
-        var applicableSources = Set(UpdateSource.allCases)
-        if let inventory, inventory.warnings.isEmpty {
-            let apps = inventory.apps.filter { $0.state != .systemManaged }
-            if !apps.contains(where: \.hasStoreReceipt) { applicableSources.remove(.appStore) }
-            if !apps.contains(where: { !$0.hasStoreReceipt }) {
-                applicableSources.remove(.homebrew); applicableSources.remove(.macPorts)
-            }
-        }
+        let applicableSources = inventory?.applicableSources ?? Set(UpdateSource.allCases)
         let requestedSources = applicableSources.subtracting(disabledSources)
         func skip(_ index: Int, _ source: UpdateSource) async {
             if disabledSources.contains(source) { await report(index, .disabled, "\(source.title) is disabled in Settings.") }

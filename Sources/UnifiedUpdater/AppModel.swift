@@ -50,6 +50,7 @@ final class AppModel: ObservableObject {
     private let setupLocate: (String) -> String?
     var busy: Bool { settingUp || scanning || preparing || updating }
     var setupNeedsAttention: Bool { setupItems.contains { $0.phase == .failed } }
+    var sourceChecksNeedAttention: Bool { sources.contains { !preferences.disabledSources.contains($0.source) && $0.needsAttention } }
     var eligible: [AppRecord] { apps.filter(preferences.isEligible) }
     var checkedCount: Int { apps.filter { $0.state.isChecked }.count }
     var checkableCount: Int { apps.filter { $0.state != .systemManaged }.count }
@@ -236,6 +237,10 @@ final class AppModel: ObservableObject {
     }
     func invalidateInventory() {
         apps = []; lastScan = nil; selected = []
+        for index in sources.indices {
+            sources[index].checkRequired = nil
+            sources[index].message = "Scan settings changed. Check this source again."
+        }
         status = "Scan configuration changed. Check for updates again."
     }
     func chooseSource(_ source: UpdateSource?, for app: AppRecord) {

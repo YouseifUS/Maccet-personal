@@ -2,6 +2,34 @@
 
 Current local alpha: **0.1.2**. The latest focused validation is recorded first; older sections retain the observations and test counts from their original validation dates. Current source readiness and preparation behavior is documented in [STARTUP_SETUP.md](STARTUP_SETUP.md).
 
+## Private subprocess capture — 17 October 2026
+
+The repository's `ProcessRunner` created temporary output directories and files
+with default permissions. Raw tool output can contain sensitive diagnostics
+before redaction. The unpublished local implementation already requested 0700
+directories and 0600 files; this change brings those explicit permissions into
+the repository and checks file creation before starting the child process.
+
+A child-process regression reads the actual permissions of its stdout/stderr
+files and their capture directory during execution. It failed with the old runner
+under process mask 000: **119 passed, 1 failed**. After the fix, **120 core checks**
+and **15 setup orchestration checks** pass. The capture check exercises masks
+000, 022, and 077 and restores the test process's original mask. Production code
+does not modify the user's mask. Existing checks retain stdout, stderr, exit
+status, and bounded read-only timeout behavior.
+
+The capture directory uses mode 0700 and stdout/stderr use mode 0600 before the
+child starts. Creation failure prevents command execution. Existing scoped
+temporary-capture cleanup runs on completion. This addresses POSIX capture
+permissions; diagnostic redaction remains a separate layer. Tests use synthetic
+output and controlled fixtures without updating installed applications or tools.
+
+The optimized release build, packaging, local ad-hoc signature verification,
+and bundled startup-script check pass. An isolated unpublished UI copy passes
+**131 core**, **5 existing UI**, and **15 setup orchestration** checks. A fresh
+read-only inventory remains **112 apps** (34 third-party, 78 system-managed),
+with **0 warnings**. The original checkout remains unchanged.
+
 ## Canonical application path revalidation — 17 October 2026
 
 The repository's revalidation checked bundle ID, version, build, and receipt, but

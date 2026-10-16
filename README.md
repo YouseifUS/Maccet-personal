@@ -145,6 +145,8 @@ Default storage: `~/Library/Application Support/UnifiedUpdater/`.
 
 Explicit source preparation contacts GitHub, Homebrew, MacPorts, and Apple services to obtain and verify dependencies. Application checks contact source services. There is no analytics service or separate inventory-upload backend. Reports are exported only to a location you choose. Diagnostic strings redact home paths and common credential-bearing URL values; review any report before sharing it.
 
+Subprocess output is captured in a private directory (0700) with owner-only stdout/stderr files (0600), created before the command starts. These temporary captures are removed when the runner finishes. File permissions protect raw output while it awaits diagnostic redaction.
+
 If the app closes during an operation, active history entries become **Interrupted** on next launch. No operation is automatically retried and no artifacts are automatically deleted during recovery. Rescan first to inspect the installed state.
 
 ## Project structure

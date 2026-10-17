@@ -38,3 +38,7 @@ Commands: `bash scripts/test.sh`, `bash scripts/test-setup-retry.sh`, `bash scri
 Cleanup retains directory structure and its ownership marker while deleting file/link entries through held descriptors. Metadata-only requests have separate outcomes and preserve tool-preparation evidence; Homebrew API cache fallback is disclosed. Source minimums are command-format baselines, not platform certification.
 
 These fixtures and the local release build do not complete real required-application updates/clean-machine acceptance (#19), long-running App Store attention/assisted workflows (#18), broad catalog/mapping/benchmark/Sparkle/vendor work (#30–#35), full accessibility acceptance (#36), other OS/architecture configurations (#37), or Developer ID/notarization/delivered-artifact acceptance (#38). Those issues remain open.
+
+## Mapping-evidence follow-up
+
+The subsequent mapping-trust change builds on this integrated branch and adds authenticated source-evidence data, constrained signed-catalog acceptance, revision/expiry protection and an automatic-installation boundary. Its combined core suite passes 160 checks. The schema foundation addresses #31; production publisher configuration, broad discovery and remote feed/vendor execution remain separate capabilities.

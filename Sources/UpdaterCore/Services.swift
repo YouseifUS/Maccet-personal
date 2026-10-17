@@ -119,6 +119,7 @@ public struct UpdateEngine {
               checked.targetBuild == app.targetBuild,
               checked.targetPackageVersion == app.targetPackageVersion,
               checked.targetVersionIsMarketing == app.targetVersionIsMarketing,
+              checked.sourceEvidence == app.sourceEvidence,
               checked.targetSHA256 == app.targetSHA256,
               checked.state == .updateAvailable, checked.automatic else {
             throw UpdaterError("The source, target release, or installation capability changed. Rescan and review a new plan.")

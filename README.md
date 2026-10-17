@@ -94,6 +94,8 @@ Explicit source preparation installs or updates the source tools themselves, inc
 | Sources | Separate metadata requests and tool preparation, per-source results, retry, canonical paths, versions, errors, scan controls, and documentation |
 | Settings | Application folders, exclusion reset, and privacy/behavior information |
 
+Use **Navigate → Command-1…Command-7** for the seven pages and **Command-F** to focus application search. Escape clears a search query or closes a review/details sheet. See [keyboard/accessibility validation and limits](docs/ACCESSIBILITY-VALIDATION-2026-10-18.md).
+
 Right-click an app for details, Reveal in Finder, Ignore App, or Skip This Release. **Show ignored** reveals excluded entries; **Settings → Reset All Exclusions** restores them.
 
 ## Official vendor-assisted checks

@@ -51,6 +51,7 @@ final class AppModel: ObservableObject {
     private var assistedPlans: [UUID: PlannedUpdate] = [:]
     private var lastObservationSave: [UUID: TimeInterval] = [:]
     @Published var search = ""
+    @Published var searchFocusRequest = UUID()
     @Published var sourceFilter: UpdateSource?
     @Published var showIgnored = false
     @Published var selected = Set<String>()
@@ -296,6 +297,11 @@ final class AppModel: ObservableObject {
             status = result.0 ? "Vendor-assisted target verified; no automatic installation was performed." : "Vendor result needs attention. See Activity."
             if result.0 { scan() }
         }
+    }
+
+    func focusApplicationSearch() {
+        if ![.updates, .installed, .appStore].contains(screen ?? .updates) { screen = .installed }
+        searchFocusRequest = UUID()
     }
 
     func prepare(_ candidates: [AppRecord]) {

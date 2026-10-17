@@ -3,6 +3,7 @@ import SwiftUI
 import UpdaterCore
 
 struct ContentView: View {
+    @FocusState private var applicationSearchFocused: Bool
     @EnvironmentObject var model: AppModel
     var body: some View {
         GeometryReader { geometry in
@@ -28,6 +29,7 @@ struct ContentView: View {
         }
         .tint(Maccet.accent).foregroundStyle(Maccet.text)
         .frame(minWidth: 1080, minHeight: 720)
+        .onChange(of: model.searchFocusRequest) { _ in applicationSearchFocused = true }
         .sheet(isPresented: $model.showingReview, onDismiss: { if !model.updating { model.cancelReview() } }) { ReviewSheet().environmentObject(model) }
         .sheet(item: $model.vendorReview) { plan in VendorHandoffSheet(plan: plan) }
         .sheet(item: $model.inspected) { app in AppDetailSheet(app: app).environmentObject(model) }
@@ -153,6 +155,7 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(Maccet.secondary).accessibilityHidden(true)
                 TextField("Search applications", text: $model.search).textFieldStyle(.plain).accessibilityLabel("Search applications")
+                    .focused($applicationSearchFocused).onExitCommand { model.search = "" }
                 if !model.search.isEmpty { Button { model.search = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).foregroundStyle(Maccet.secondary).accessibilityLabel("Clear search") }
             }.padding(.horizontal, 10).frame(height: 32).frame(maxWidth: 280).background(Maccet.surface, in: RoundedRectangle(cornerRadius: 8)).overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Maccet.border))
             if storeView { Text("App Store · via mas").font(.system(size: 12)).foregroundStyle(Maccet.secondary) }

@@ -376,9 +376,9 @@ struct SettingsPage: View {
                 Surface {
                     VStack(alignment: .leading, spacing: 16) {
                         Text("Privacy & behavior").font(.system(size: 15, weight: .semibold))
-                        Label("Inventory and history stay on this Mac. Up to 1,000 recent attempts are kept.", systemImage: "lock.shield")
-                        Label("Source preparation and checks contact GitHub, Homebrew, MacPorts, and Apple services.", systemImage: "network")
-                        Label("Application updates require your review and revalidation.", systemImage: "checkmark.shield")
+                        Label("Inventory, automatic history and assisted results stay on this Mac. Up to 1,000 records of each history are kept.", systemImage: "lock.shield")
+                        Label("Source preparation contacts GitHub, Homebrew, MacPorts and Apple. Optional checks contact Google and the feed or catalog publishers you enable.", systemImage: "network")
+                        Label("Updates use a reviewed manager plan or the vendor’s own updater.", systemImage: "checkmark.shield")
                         Label("Running apps can be asked to quit normally. Apps are never force-quit.", systemImage: "hand.raised")
                     }.font(.system(size: 12)).foregroundStyle(Maccet.secondary)
                 }

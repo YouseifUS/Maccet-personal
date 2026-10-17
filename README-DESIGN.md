@@ -81,7 +81,7 @@ The brand anchors are **Maccet Navy `#032A43`** and **Maccet Orange `#FF6A00`**.
 | `sidebar.secondary` | `#A8B9C6` | `#A8B9C6` | Group labels, tagline, version |
 | `text.primary` | `#102B3D` | `#EEF4F7` | Titles and primary values |
 | `text.secondary` | `#576A78` | `#A7B8C5` | Supporting text |
-| `text.tertiary` | `#617481` | `#8FA5B5` | Dates and metadata |
+| `text.tertiary` | `#5C6E7A` | `#8FA5B5` | Dates and metadata |
 | `border.subtle` | `#DDE3E6` | `#2C4050` | Dividers and card edges |
 | `selection.background` | `#E8EEF2` | `#193B52` | Selected app rows |
 | `accent.text` | `#B54708` | `#FF9B57` | Small orange-related labels and links |

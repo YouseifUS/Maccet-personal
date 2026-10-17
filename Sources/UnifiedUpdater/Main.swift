@@ -70,6 +70,15 @@ struct DesktopApp: App {
                         ])
                     }
                 }
+                CommandMenu("Navigate") {
+                    ForEach(Array(Screen.allCases.enumerated()), id: \.element.id) { index, screen in
+                        Button(screen.rawValue) { model.screen = screen }
+                            .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
+                    }
+                }
+                CommandGroup(after: .textEditing) {
+                    Button("Find Application") { model.focusApplicationSearch() }.keyboardShortcut("f", modifiers: .command)
+                }
                 CommandGroup(after: .appInfo) {
                     Button("Check for Updates") { model.scan() }.keyboardShortcut("r", modifiers: .command).disabled(model.busy)
                     Button("Export Report…") { model.exportReport() }

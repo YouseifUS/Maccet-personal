@@ -850,13 +850,35 @@ private enum Checks {
                 try expect(result.dropFirst().allSatisfy { $0.phase == (disabled ? .disabled : .notRequired) })
             }
         }
-        await check("Store-only readiness preserves the MacPorts helper dependency without maintenance") {
+        await check("Store-only runtime readiness does not require the helper maintenance manager") {
             let fixture = try Fixture(); defer { fixture.clean() }
             var inventory = AppInventory().discover(roots: [fixture.root.path]); inventory.apps[0].hasStoreReceipt = true
             let setup = SetupFixture(); setup.paths["mas"] = "/opt/local/bin/mas"
             let result = await setup.service().checkReadiness(inventory: inventory)
-            try expect(result[1].phase == .notRequired && result[2].dependencyFor == .appStore && result[3].phase == .ready)
-            try expect(setup.runner.calls.count == 3 && setup.actions.isEmpty)
+            try expect(result[0].phase == .notRequired && result[1].phase == .notRequired && result[2].phase == .notRequired && result[3].phase == .ready)
+            try expect(result.allSatisfy { $0.dependencyFor == nil } && setup.runner.calls.count == 1 && setup.actions.isEmpty)
+        }
+        await check("A working mas without disabled managers is runtime ready without developer tools") {
+            for path in ["/usr/local/bin/mas", "/opt/local/bin/mas"] {
+                let fixture = try Fixture(); defer { fixture.clean() }
+                var inventory = AppInventory().discover(roots: [fixture.root.path]); inventory.apps[0].hasStoreReceipt = true
+                let setup = SetupFixture(); setup.paths = ["mas": path]; setup.toolsMissing = true
+                let result = await setup.service().checkReadiness(inventory: inventory, disabledSources: [.homebrew, .macPorts])
+                try expect(result[0].phase == .notRequired && result[1].phase == .disabled && result[2].phase == .disabled && result[3].phase == .ready)
+                try expect(!result.contains { $0.phase.needsAttention } && result.allSatisfy { $0.dependencyFor == nil })
+                try expect(setup.runner.calls.count == 1 && setup.runner.calls[0].executable == path && setup.actions.isEmpty)
+            }
+        }
+        await check("Missing or broken mas requests attention without claiming its disabled manager is unavailable") {
+            for state in ["missing", "broken", "old"] {
+                let setup = SetupFixture(); setup.paths = state == "missing" ? [:] : ["mas": "/usr/local/bin/mas"]
+                setup.toolsMissing = true
+                if state == "broken" { setup.brokenTools = ["mas"] }
+                if state == "old" { setup.masVersion = "6.0.0" }
+                let result = await setup.service().checkReadiness(disabledSources: [.homebrew, .macPorts])
+                try expect(result[0].phase == .notRequired && result[1].phase == .disabled && result[2].phase == .disabled && result[3].phase.needsAttention)
+                try expect(setup.actions.isEmpty && !setup.runner.calls.contains { $0.executable == "/usr/bin/xcode-select" })
+            }
         }
         await check("Explicit preparation updates all three dependencies without upgrading applications") {
             let fixture = SetupFixture()

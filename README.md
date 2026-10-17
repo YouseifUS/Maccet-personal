@@ -18,7 +18,9 @@ For example, a verified Homebrew route and a verified MacPorts route can both be
 
 This release aggregates **installed-manager ownership results**, not the entire public catalogs of every manager. A matching catalog name cannot take over an existing application. Cross-catalog discovery and reviewed ownership transfer remain separate work.
 
-Every GUI launch checks readiness of the applicable enabled source tools before checking applications. Missing tools appear as **Unavailable**; launch does not install tools, refresh their indexes, or request administrator authorization. Choose **Sources → Prepare Sources** to install missing tools and maintain required sources. Partial preparation failures offer **Retry Setup**, while available sources can still check apps. See [source readiness and preparation](docs/STARTUP_SETUP.md) for prerequisites, authorization, and platform limitations.
+Every GUI launch checks readiness of the applicable enabled source tools before checking applications. Missing tools appear as **Unavailable**; launch does not install tools, refresh their indexes, or request administrator authorization. A working App Store helper is checked directly during launch; its package manager and Apple developer tools are required only when the chosen maintenance action needs them. Missing or broken helpers still require attention.
+
+Choose **Sources → Prepare Sources** to install missing tools and maintain required sources. Partial preparation failures offer **Retry Setup**, while available sources can still check apps. See [source readiness and preparation](docs/STARTUP_SETUP.md) for prerequisites, authorization, and platform limitations.
 
 Installing a manager does not make it the owner of existing direct-download applications. Coverage still depends on verified ownership; a missing or failed source cannot claim complete coverage.
 
@@ -51,6 +53,8 @@ Installing a manager does not make it the owner of existing direct-download appl
 - MacPorts at `/opt/local/bin/port` for MacPorts-managed apps.
 - `mas` 7+ under `/opt/homebrew/bin`, `/usr/local/bin`, or `/opt/local/bin` for identity-based store checks.
 - A suitable App Store account and any required macOS authorization for store updates.
+
+A working App Store helper is checked directly during launch; its package manager and Apple developer tools are required only when the chosen maintenance action needs them. Missing or broken helpers still require attention.
 
 Choose **Sources → Prepare Sources** to install and update these dependencies. Fresh automatic Homebrew installation currently requires Apple Silicon; Intel users must install Homebrew once using its official instructions. During explicit preparation, missing Apple developer tools open Apple's system installer; finish that installer and choose **Retry Setup**. Installer availability and upstream OS support can further limit setup on older macOS versions. Inventory and available sources remain usable if setup fails. Official instructions: [Homebrew](https://docs.brew.sh/Installation), [MacPorts](https://www.macports.org/install.php), and [mas](https://github.com/mas-cli/mas).
 

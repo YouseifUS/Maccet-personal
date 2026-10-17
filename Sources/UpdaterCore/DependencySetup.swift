@@ -118,8 +118,8 @@ public struct DependencySetup {
         }
         let needsMas = requestedSources.contains(.appStore)
         let masUsesPorts = needsMas && locate("mas") == "/opt/local/bin/mas"
-        let needsBrew = requestedSources.contains(.homebrew) || (needsMas && !masUsesPorts)
-        let needsPorts = requestedSources.contains(.macPorts) || masUsesPorts
+        let needsBrew = requestedSources.contains(.homebrew) || (prepareTools && needsMas && !masUsesPorts)
+        let needsPorts = requestedSources.contains(.macPorts) || (prepareTools && masUsesPorts)
         // Presence alone cannot validate a cached success. Probe only required
         // tools; healthy results skip maintenance, stale results use normal repair.
         // Finish these checks before publishing cached ready states in progress.
@@ -141,21 +141,25 @@ public struct DependencySetup {
         if !needsPorts { await skip(2, .macPorts) }
         else if !requestedSources.contains(.macPorts) { items[2].dependencyFor = .appStore }
         if !needsMas { await skip(3, .appStore) }
-        guard needsBrew || needsPorts else {
+        guard needsBrew || needsPorts || needsMas else {
             await report(0, .notRequired, "No source requires developer tools for this inventory.")
             return items
         }
         if !prepareTools {
-            await report(0, .running, "Checking Apple developer tools…")
-            do {
-                // Developer-tool shims can request installation when tools are
-                // absent. Read only the selected directory during launch checks.
-                let directory = try await command("/usr/bin/xcode-select", ["--print-path"], timeout: 20)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard directory.hasPrefix("/") else { throw UpdaterError("No developer tools directory is selected.") }
-                await report(0, .ready, "Developer tools directory is selected. Preparation checks the compiler before maintenance.")
-            } catch {
-                await report(0, .unavailable, "Apple developer tools are unavailable. Choose Prepare Sources to request Apple's installer. " + error.localizedDescription)
+            if needsBrew || needsPorts {
+                await report(0, .running, "Checking Apple developer tools…")
+                do {
+                    // Developer-tool shims can request installation when tools are
+                    // absent. Read only the selected directory during launch checks.
+                    let directory = try await command("/usr/bin/xcode-select", ["--print-path"], timeout: 20)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard directory.hasPrefix("/") else { throw UpdaterError("No developer tools directory is selected.") }
+                    await report(0, .ready, "Developer tools directory is selected. Preparation checks the compiler before maintenance.")
+                } catch {
+                    await report(0, .unavailable, "Apple developer tools are unavailable. Choose Prepare Sources to request Apple's installer. " + error.localizedDescription)
+                }
+            } else {
+                await report(0, .notRequired, "App Store readiness is checked directly; developer tools are checked when source maintenance needs them.")
             }
             // A missing prerequisite must not hide the readiness of working tools.
             // This path never installs, refreshes metadata, or requests authorization.

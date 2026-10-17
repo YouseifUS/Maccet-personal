@@ -86,6 +86,8 @@ Right-click an app for details, Reveal in Finder, Ignore App, or Skip This Relea
 
 Only one Maccet operation can own a canonical application path for the current user at a time, across engines, separate app instances and separate download caches. Another attempt is deferred before source commands or cache creation; unrelated apps remain independent. Ownership spans preflight, installation, verification and cleanup. macOS releases the lock if its owner exits, but Maccet never retries the installation automatically: rescan and review after interruption. Other package-manager clients do not participate in this Maccet ownership protocol.
 
+Review also records the canonical destination of the selected update tool. Changing a tool symlink after review requires a new scan and plan; the destination is checked again at installation boundaries. This detects destination changes, not in-place binary replacement, library changes or an external retarget in the interval after a check.
+
 Homebrew updates are scoped to a named cask with `--no-quit` and `--skip-cask-deps`. Homebrew's automatic cleanup is disabled for these invocations. A dry run is shown before execution. Homebrew can still perform its own necessary installation actions, such as binary linking; related changes reported by its preview are visible in the review sheet.
 
 The first alpha supports automatic updates for simple, specifically versioned app casks whose target metadata can be verified. Pinned, disabled, complex installer, non-numeric vendor-version, and ambiguous cases require manual attention. Apps installed outside Homebrew are not silently adopted, even if they appear in its catalog.

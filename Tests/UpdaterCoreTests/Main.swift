@@ -472,6 +472,36 @@ private enum Checks {
             let retried = await engine.execute(plan, cleanup: true) { _, _ in }
             try expect(retried.state == .succeeded, retried.message)
         }
+        await check("Reviewed tool symlink destinations remain bound through both preflights and installation") {
+            for changeAt in ["after-review", "isolated-preflight", "install-boundary", "stable"] {
+                let fixture = try Fixture(); defer { fixture.clean() }
+                let tool = fixture.root.appendingPathComponent("brew")
+                try FileManager.default.createSymbolicLink(atPath: tool.path, withDestinationPath: "/usr/bin/true")
+                func retarget() throws {
+                    try FileManager.default.removeItem(at: tool)
+                    try FileManager.default.createSymbolicLink(atPath: tool.path, withDestinationPath: "/usr/bin/false")
+                }
+                var app = try fixture.candidate(); app.routeExecutable = tool.path
+                let runner = try fixture.runner { try fixture.write(version: "2.0", build: "20") }
+                let engine = UpdateEngine(runner: runner, cacheRoot: fixture.root.appendingPathComponent("Cache"), sourcePaths: [.homebrew: tool.path])
+                let plan = try await engine.prepare([app], preferences: Preferences())[0]
+                runner.calls = []
+                if changeAt == "after-review" { try retarget() }
+                let original = runner.handler
+                runner.handler = { call in
+                    let result = try original(call)
+                    if changeAt == "isolated-preflight", call.args.first == "info", call.environment["HOMEBREW_CACHE"]?.contains("Operations") == true { try retarget() }
+                    return result
+                }
+                let result = await engine.execute(plan, cleanup: true) { state, _ in
+                    if changeAt == "install-boundary", state == .installing { try retarget() }
+                }
+                let installs = runner.calls.filter { $0.args.first == "upgrade" }
+                if changeAt == "stable" { try expect(result.state == .succeeded && installs.count == 1, result.message) }
+                else { try expect(result.state == .failed && installs.isEmpty, "Changed destination reached installation at " + changeAt) }
+                if changeAt == "after-review" { try expect(runner.calls.isEmpty) }
+            }
+        }
         await check("Reviewed updates execute only the named cask and clean only after verification") {
             let fixture = try Fixture(); defer { fixture.clean() }
             let app = try fixture.candidate()

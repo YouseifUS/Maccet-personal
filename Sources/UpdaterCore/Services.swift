@@ -76,6 +76,9 @@ public struct UpdateEngine {
         var plans: [PlannedUpdate] = []
         for app in apps where seen.insert(app.id).inserted {
             guard preferences.isEligible(app) else { throw UpdaterError("\(app.name) is no longer eligible for automatic updating.") }
+            var plan = PlannedUpdate(app: app, preview: "")
+            try plan.reviewedSignature.validate(at: app.path)
+            try plan.validateReviewedTool()
             _ = try await revalidate(app)
             let preview: String
             if app.source == .homebrew {
@@ -85,9 +88,9 @@ public struct UpdateEngine {
             } else {
                 preview = "Update \(app.name) through App Store to \(app.targetVersion ?? ""). macOS will ask for administrator authorization. Save your work and close the app before continuing."
             }
-            var plan = PlannedUpdate(app: app, preview: Diagnostics.redact(preview))
             try plan.reviewedSignature.validate(at: app.path)
-            plan.preview += "\n\n" + plan.reviewedSignature.reviewSummary
+            try plan.validateReviewedTool()
+            plan.preview = Diagnostics.redact(preview) + "\n\n" + plan.reviewedSignature.reviewSummary
             plans.append(plan)
         }
         guard !plans.isEmpty else { throw UpdaterError("There are no eligible updates in this selection.") }
@@ -133,11 +136,13 @@ public struct UpdateEngine {
             defer { ownership.release() }
             try await onStage(.preflight, record.message)
             try plan.reviewedSignature.validate(at: app.path)
+            try plan.validateReviewedTool()
             _ = try await revalidate(app)
             guard !(await Self.isRunning(app)) else {
                 record.state = .deferred; record.message = "The app is still running. Close it and review a new update plan."; return record
             }
             if app.source == .homebrew {
+                try plan.validateReviewedTool()
                 let base = cacheRoot ?? FileManager.default.temporaryDirectory.appendingPathComponent("UnifiedUpdater")
                 let cache = try OwnedUpdateCache(root: base.appendingPathComponent("Operations"))
                 ownedCache = cache
@@ -149,15 +154,18 @@ public struct UpdateEngine {
                 }
                 try await onStage(.installing, "Installing the reviewed release through Homebrew.")
                 try plan.reviewedSignature.validate(at: app.path)
+                try plan.validateReviewedTool()
                 try await HomebrewAdapter(executable: app.routeExecutable!, runner: runner, cacheRoot: cache.folder, freezeMetadata: true).upgrade(app)
             }
             else if app.source == .macPorts {
                 try await onStage(.installing, "Installing the reviewed release through MacPorts.")
                 try plan.reviewedSignature.validate(at: app.path)
+                try plan.validateReviewedTool()
                 try await MacPortsAdapter(executable: app.routeExecutable!, runner: runner).upgrade(app)
             } else {
                 try await onStage(.installing, "Installing the reviewed release through App Store.")
                 try plan.reviewedSignature.validate(at: app.path)
+                try plan.validateReviewedTool()
                 try await AppStoreAdapter(executable: app.routeExecutable!, runner: runner).upgrade(app)
             }
             try await onStage(.verifying, "Reading the installed application again.")

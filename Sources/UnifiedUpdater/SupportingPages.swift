@@ -56,6 +56,7 @@ struct SourcesPage: View {
     @EnvironmentObject var model: AppModel
     @ViewState private var showSteps = true
     @ViewState private var showMetadata = true
+    @ViewState private var showingDiscoveryConfiguration = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -112,6 +113,32 @@ struct SourcesPage: View {
                             .font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                Surface {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Source discovery catalog").font(.system(size: 15, weight: .semibold))
+                            Spacer()
+                            Button("Configure Publisher") { showingDiscoveryConfiguration = true }.disabled(model.busy)
+                            Button("Refresh Discovery Catalog", action: model.refreshDiscovery).disabled(model.busy || model.preferences.discoveryCatalog == nil)
+                        }
+                        Text(model.discoveryStatus.message).font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                        if let error = model.discoveryStatus.error { Text("Last refresh failed: " + error).font(.system(size: 12)).foregroundStyle(StatusTone.failure.foreground).fixedSize(horizontal: false, vertical: true) }
+                        if let fetched = model.discoveryStatus.lastSuccess { Text("Last fetched: \(fetched.formatted(date: .abbreviated, time: .shortened))").font(.system(size: 12)).foregroundStyle(Maccet.secondary) }
+                        if let revision = model.discoveryStatus.revision { Text("Catalog revision \(revision)").font(.system(size: 12)) }
+                        if let expiry = model.discoveryStatus.expiresAt { Text("Expires: \(expiry.formatted(date: .abbreviated, time: .shortened))").font(.system(size: 12)).foregroundStyle(Maccet.secondary) }
+                        Text("A configured publisher can suggest sources beyond installed managers. Candidates do not establish ownership, checked-release coverage or installation permission. Scans reuse only an authenticated, unexpired cache.")
+                            .font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Surface {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle("Check supported vendor releases", isOn: Binding(get: { model.preferences.checkOfficialVendorReleases == true }, set: { enabled in
+                            model.preferences.checkOfficialVendorReleases = enabled; model.savePreferences(); model.invalidateInventory()
+                        })).toggleStyle(.switch).disabled(model.busy)
+                        Text("Checks Google Chrome using official release information when no manager claims it. Confirm each copy's channel in Details. Complete the update in Chrome, then verify the reviewed result; Maccet does not install vendor updates.")
+                            .font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 ForEach(model.sources) { source in SourceCard(source: source) }
                 Text("These switches control checks and future source preparation. A disabled manager may still be needed for the enabled App Store helper.").font(.system(size: 12, weight: .medium)).foregroundStyle(Maccet.secondary)
                 if !model.warnings.isEmpty {
@@ -124,7 +151,7 @@ struct SourcesPage: View {
                 }
                 Text("Each installed copy uses one verified manager. Choose between conflicting routes in the application's Details.").font(.system(size: 12)).foregroundStyle(Maccet.secondary)
             }.padding(.horizontal, 28).padding(.bottom, 28)
-        }
+        }.sheet(isPresented: $showingDiscoveryConfiguration) { DiscoveryCatalogSheet() }
     }
 }
 private struct SourceCard: View {
@@ -202,11 +229,33 @@ struct ActivityPage: View {
                         }
                     }
                 }
-                if model.history.isEmpty {
+                if model.history.isEmpty && model.vendorHistory.isEmpty {
                     EmptyState(symbol: "clock.arrow.circlepath", title: "No update attempts yet", message: "Your update history will appear here, including verification results and any interrupted attempts.").frame(minHeight: 340)
                 } else {
-                    Text("Update history").font(.system(size: 15, weight: .semibold))
+                    if !model.history.isEmpty { Text("Automatic update history").font(.system(size: 15, weight: .semibold)) }
                     ForEach(model.history) { entry in HistoryCard(entry: entry) }
+                }
+                if !model.vendorHistory.isEmpty {
+                    Text("Vendor-assisted updates").font(.system(size: 15, weight: .semibold))
+                    ForEach(model.vendorHistory) { entry in
+                        Surface {
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack {
+                                    Text(entry.appName).font(.system(size: 13, weight: .semibold))
+                                    Spacer()
+                                    StatusPill(title: entry.state == .verified ? "Assisted target verified" : entry.state == .notVerified ? "Not verified" : "Awaiting you", tone: entry.state == .verified ? .success : .attention)
+                                }
+                                Text("\(entry.fromVersion) → \(entry.targetVersion) · \(entry.channel)").font(.system(size: 12, design: .monospaced))
+                                Text(entry.message).font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                                Text(entry.appPath).font(.system(size: 11, design: .monospaced)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                                if model.canVerifyVendorResult(entry.id) {
+                                    Button("Verify Reviewed Result") { model.verifyVendorResult(entry.id) }.disabled(model.busy)
+                                } else if entry.state != .verified {
+                                    Text("This session has no live review context. Check the application again before reviewing a new target.").font(.system(size: 12)).foregroundStyle(Maccet.secondary)
+                                }
+                            }
+                        }
+                    }
                 }
             }.padding(.horizontal, 28).padding(.bottom, 28)
         }

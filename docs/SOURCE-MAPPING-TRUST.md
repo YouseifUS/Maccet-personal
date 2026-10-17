@@ -25,3 +25,7 @@ The retained known-good envelope is stored in a private `LocalStore`; invalid in
 ## Verification
 
 Checks use real ephemeral Ed25519 keys and disposable local stores. They cover trusted/untrusted signatures, rollback/equivocation, expiry and client-minimum advancement, retained known-good state, identity/channel/domain conflicts and unknowns, constrained fields and URLs, route serialization, automatic-eligibility rejection, input bounds and cache symlinks. No private signing key is stored or published.
+
+## Optional discovery consumer
+
+The Sources configuration can explicitly pin an owner-selected publisher and endpoint. `SourceDiscoveryService` retrieves bounded envelopes, preserves this store’s authentication/revision/expiry rules, and attaches candidates independently of manager ownership. Channel reviews are bound to a canonical installed path, bundle and currently validated publisher team. See [the discovery lifecycle](DISCOVERY-CATALOG.md); no default publisher, remote key acceptance, manager adoption or release-check capability is implied.

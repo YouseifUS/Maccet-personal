@@ -16,58 +16,12 @@ public protocol SparkleFeedLoading {
 
 public struct SparkleFeedLoader: SparkleFeedLoading {
     public static let maximumBytes = 1024 * 1024
-    private var protocolClasses: [AnyClass]?
+    private var transport = BoundedMetadataLoader()
     public init() {}
-    @_spi(Testing) public init(protocolClasses: [AnyClass]) { self.protocolClasses = protocolClasses }
-    public static func validateURL(_ url: URL) throws {
-        guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              url.absoluteString.utf8.count <= 2048, parts.scheme == "https",
-              parts.user == nil, parts.password == nil, parts.fragment == nil,
-              parts.port == nil || parts.port == 443, let host = parts.host?.lowercased(),
-              host.range(of: #"\A(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\z"#, options: .regularExpression) != nil,
-              !["localhost", "local", "internal", "home", "lan", "test", "invalid"].contains(host.split(separator: ".").last.map(String.init) ?? "") else {
-            throw UpdaterError("Sparkle checks require a public HTTPS hostname without credentials, a fragment or a custom port.")
-        }
-    }
+    @_spi(Testing) public init(protocolClasses: [AnyClass]) { transport = BoundedMetadataLoader(protocolClasses: protocolClasses) }
+    public static func validateURL(_ url: URL) throws { try BoundedMetadataLoader.validateURL(url) }
     public func load(_ url: URL) async throws -> Data {
-        try Self.validateURL(url)
-        let configuration = URLSessionConfiguration.ephemeral
-        if let protocolClasses { configuration.protocolClasses = protocolClasses }
-        configuration.httpShouldSetCookies = false
-        configuration.httpCookieStorage = nil
-        configuration.urlCredentialStorage = nil
-        configuration.urlCache = nil
-        configuration.timeoutIntervalForRequest = 15
-        configuration.timeoutIntervalForResource = 20
-        let session = URLSession(configuration: configuration, delegate: NoFeedRedirects(), delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
-        request.setValue("application/rss+xml, application/xml, text/xml", forHTTPHeaderField: "Accept")
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              http.url == url, response.expectedContentLength <= Int64(Self.maximumBytes),
-              ["application/rss+xml", "application/xml", "text/xml"].contains(response.mimeType?.lowercased() ?? "") else {
-            throw UpdaterError("Sparkle feed response was redirected, unsuccessful, oversized or not XML.")
-        }
-        var data = Data()
-        for try await byte in bytes {
-            guard data.count < Self.maximumBytes else { throw UpdaterError("Sparkle feed exceeded the 1 MiB response limit.") }
-            data.append(byte)
-            if data.count % 4096 == 0 { try Task.checkCancellation() }
-        }
-        return data
-    }
-}
-
-private final class NoFeedRedirects: NSObject, URLSessionTaskDelegate {
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        completionHandler(nil)
-    }
-    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
-                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        // TLS uses platform trust; HTTP authentication is never requested from the user.
-        completionHandler(challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust ? .performDefaultHandling : .cancelAuthenticationChallenge, nil)
+        try await transport.load(url, maximumBytes: Self.maximumBytes, mimeTypes: ["application/rss+xml", "application/xml", "text/xml"])
     }
 }
 

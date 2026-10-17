@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 
 public enum ReportExport {
-    public static func data(apps: [AppRecord], sources: [SourceHealth], history: [ActivityRecord], lastScan: Date?) throws -> Data {
+    public static func data(apps: [AppRecord], sources: [SourceHealth], history: [ActivityRecord], vendorHistory: [VendorAssistedRecord] = [], lastScan: Date?) throws -> Data {
         struct Report: Encodable {
             var version = "0.1.1"
             var generatedAt = Date()
@@ -10,9 +10,10 @@ public enum ReportExport {
             var apps: [AppRecord]
             var sources: [SourceHealth]
             var history: [ActivityRecord]
+            var vendorAssistedHistory: [VendorAssistedRecord]
         }
         let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-        let data = try encoder.encode(Report(lastScan: lastScan, apps: apps, sources: sources, history: history))
+        let data = try encoder.encode(Report(lastScan: lastScan, apps: apps, sources: sources, history: history, vendorAssistedHistory: vendorHistory))
         // Redact string values, never serialized JSON syntax. A URL/token in a
         // diagnostic must not consume closing quotes and corrupt the report.
         let object = try JSONSerialization.jsonObject(with: data)

@@ -137,6 +137,8 @@ public struct AuthenticatedSourceMappingCatalog {
     private let catalog: SourceMappingCatalog
     fileprivate init(_ catalog: SourceMappingCatalog) { self.catalog = catalog }
     public var revision: UInt64 { catalog.revision }
+    public var issuedAt: Date { catalog.issuedAt }
+    public var expiresAt: Date { catalog.expiresAt }
     public var mappings: [SourceMapping] { catalog.mappings }
     public func evidence(mappingID: String, identity: SourceIdentity, now: Date = Date()) throws -> SourceEvidence {
         try catalog.evidence(mappingID: mappingID, identity: identity, now: now)

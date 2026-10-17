@@ -1,6 +1,6 @@
 import Foundation
 import AppKit
-import UpdaterCore
+@_spi(Testing) import UpdaterCore
 
 private struct Failed: Error { let message: String }
 private func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
@@ -15,22 +15,34 @@ private final class ControlledRunner: CommandRunning {
         return try handler(call)
     }
 }
+private final class DiscoveryLoaderFixture: SourceCatalogLoading {
+    var calls = 0
+    func load(_ url: URL) async throws -> Data { calls += 1; return Data("{}".utf8) }
+}
+private final class VendorLoaderFixture: MetadataLoading {
+    var calls = 0
+    func load(_ url: URL, maximumBytes: Int, mimeTypes: [String]) async throws -> Data {
+        calls += 1
+        return Data(#"{"releases":[{"name":"chrome/platforms/mac_arm64/channels/stable/versions/2.0.0.0/releases/123","version":"2.0.0.0","fraction":1,"serving":{"startTime":"2020-01-01T00:00:00Z"}}]}"#.utf8)
+    }
+}
 @MainActor private final class Session {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("maccet-model-check-" + UUID().uuidString)
     let runner = ControlledRunner()
     let executable: String
     var model: AppModel!
     var installs: [String] = []
+    var openedURLs: [URL] = []
     var fail: Set<String> = []
     var cancelAfterFirst = false
     var keys: [String] = ["one", "two", "three"]
-    init() throws {
+    init(discoveryLoader: any SourceCatalogLoading = SourceCatalogLoader(), vendorService: OfficialVendorService = OfficialVendorService()) throws {
         // A harmless fixed executable identity is used only for path checks; the injected runner never launches it.
         executable = "/usr/bin/true"
         try FileManager.default.createDirectory(at: root.appendingPathComponent("Applications"), withIntermediateDirectories: true)
         setenv("UNIFIED_UPDATER_DATA_DIR", root.appendingPathComponent("Data").path, 1)
         for key in keys { try write(key, version: "1.0") }
-        model = AppModel(runner: runner, sourcePaths: [.homebrew: executable, .appStore: executable])
+        model = AppModel(runner: runner, sourcePaths: [.homebrew: executable, .appStore: executable], discoveryLoader: discoveryLoader, vendorService: vendorService, openExternalURL: { [unowned self] in self.openedURLs.append($0) })
         model.preferences.scanRoots = [root.appendingPathComponent("Applications").path]
         model.preferences.includeSystemApplications = false
         runner.handler = { [unowned self] call in
@@ -137,6 +149,62 @@ private final class ControlledRunner: CommandRunning {
             try await s.wait()
             try expect(s.installs.count == 1, "Remaining apps reached installation")
             try expect(s.model.history.filter { $0.state == .succeeded }.count == 1 && s.model.history.filter { $0.state == .canceled }.count == 2, "Active install was not verified independently of remaining cancellation")
+        }
+        await check("Discovery configuration requires explicit refresh, retains errors across scans and never grants unsigned channel evidence") {
+            let loader = DiscoveryLoaderFixture()
+            let s = try Session(discoveryLoader: loader); defer { s.clean() }
+            let configuration = DiscoveryCatalogConfiguration(endpoint: URL(string: "https://catalog.example.com/catalog.json")!, keyID: "fixture", publicKey: Data(repeating: 1, count: 32).base64EncodedString())
+            try s.model.configureDiscoveryCatalog(configuration)
+            try expect(loader.calls == 0 && s.model.preferences.discoveryCatalog == configuration, "Saving fetched data or lost publisher configuration")
+            s.model.scan(); try await s.wait()
+            try expect(loader.calls == 0, "A normal scan requested a remote catalog")
+            s.model.refreshDiscovery(); try await s.wait()
+            try expect(loader.calls == 1 && s.model.discoveryStatus.error != nil, "Unsigned response or refresh failure was hidden by the scan")
+            let app = try AppInventory().read(s.root.appendingPathComponent("Applications/one.app").path)
+            s.model.reviewDiscoveryChannel("stable", for: app)
+            try expect(s.model.preferences.discoveryChannelReviews?[app.id] == nil && s.model.error != nil, "Unsigned publisher gained verified channel evidence")
+            try s.model.configureDiscoveryCatalog(nil)
+            s.model.scan(); try await s.wait()
+            try expect(s.model.preferences.discoveryCatalog == nil && loader.calls == 1 && s.installs.isEmpty, "Disabled discovery fetched or installed applications")
+            let saved = try s.model.store.load(Preferences.self, file: "preferences.json")
+            try expect(saved.discoveryCatalog == nil, "Disabling discovery was not saved")
+        }
+        await check("Vendor review and guided handoff remain separate from automatic installation and retain verified results") {
+            let loader = VendorLoaderFixture()
+            let service = OfficialVendorService(loader: loader, validateIdentity: { _ in }, architectures: { _ in [.arm64] })
+            let s = try Session(vendorService: service); defer { s.clean() }
+            @MainActor func write(_ version: String) throws {
+                try s.write("one", version: version)
+                let url = s.root.appendingPathComponent("Applications/one.app/Contents/Info.plist")
+                var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: url), format: nil) as! [String: Any]
+                info["CFBundleIdentifier"] = "com.google.Chrome"
+                try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: url)
+            }
+            try write("1.0.0.0")
+            let path = s.root.appendingPathComponent("Applications/one.app").path
+            s.model.preferences.scanRoots = [path]
+            s.model.preferences.disabledSources = Set(UpdateSource.allCases)
+            s.model.preferences.discoveryChannelReviews = [path: DiscoveryChannelReview(path: path, bundleID: "com.google.Chrome", teamIdentifier: "EQHXZ8M8AV", channel: "stable")]
+            s.model.scan(); try await s.wait()
+            try expect(loader.calls == 0, "Vendor checks did not require opt-in")
+            s.model.preferences.checkOfficialVendorReleases = true
+            s.model.scan(); try await s.wait()
+            let app = s.model.apps[0]
+            try expect(app.state == .manual && !s.model.preferences.isEligible(app), "Vendor observation gained automatic eligibility")
+            s.model.prepareVendorUpdate(app); try await s.wait()
+            guard let plan = s.model.vendorReview else { throw Failed(message: "Vendor review was not prepared") }
+            s.model.startVendorHandoff(plan)
+            try expect(s.openedURLs == [OfficialVendorService.instructionsURL] && s.model.vendorHistory.count == 1, "Handoff did not use fixed official instructions")
+            s.model.verifyVendorResult(plan.id); try await s.wait()
+            try expect(s.model.vendorHistory[0].state == .notVerified, "Unchanged vendor app was verified")
+            try write("2.0.0.0")
+            s.model.verifyVendorResult(plan.id); try await s.wait()
+            try expect(s.model.vendorHistory[0].state == .verified && s.model.history.isEmpty && s.installs.isEmpty, "Assisted result became an automatic installation")
+            let persisted = try s.model.store.load([VendorAssistedRecord].self, file: "vendor-history.json")
+            try expect(persisted.count == 1 && persisted[0].state == .verified && !s.model.canVerifyVendorResult(plan.id), "Vendor result was not saved independently")
+            let report = try ReportExport.data(apps: s.model.apps, sources: s.model.sources, history: s.model.history, vendorHistory: s.model.vendorHistory, lastScan: s.model.lastScan)
+            let object = try JSONSerialization.jsonObject(with: report) as! [String: Any]
+            try expect((object["vendorAssistedHistory"] as? [[String: Any]])?.count == 1, "Vendor history was omitted from exported reports")
         }
         await check("Store filters, selection and missing-source attention remain truthful") {
             let s = try Session(); defer { s.clean() }

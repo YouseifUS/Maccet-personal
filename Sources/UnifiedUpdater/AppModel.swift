@@ -27,6 +27,10 @@ final class AppModel: ObservableObject {
     @Published var warnings: [String] = []
     @Published var preferences = Preferences()
     @Published var history: [ActivityRecord] = []
+    @Published var vendorHistory: [VendorAssistedRecord] = []
+    @Published var vendorReview: VendorHandoffPlan?
+    @Published var verifyingVendorResult = false
+    private var vendorPlans: [UUID: VendorHandoffPlan] = [:]
     @Published var lastScan: Date?
     @Published var settingUp = false
     @Published private(set) var maintainingSources = false
@@ -34,6 +38,8 @@ final class AppModel: ObservableObject {
     @Published var setupItems = DependencySetup.initialItems
     @Published var includeMacPortsInPreparation = false
     @Published var refreshingMetadata = false
+    @Published var refreshingDiscoveryCatalog = false
+    @Published var discoveryStatus = DiscoveryCatalogStatus(state: .notConfigured, message: "No discovery publisher is configured. Manager checks remain independent.")
     @Published var metadataRefreshItems: [SetupItem] = []
     @Published var lastMetadataRefreshAttempt: Date?
     private var startupStarted = false
@@ -56,7 +62,10 @@ final class AppModel: ObservableObject {
     let runner: any CommandRunning
     private let setupLocate: (String) -> String?
     private let sourcePaths: [UpdateSource: String]?
-    var busy: Bool { settingUp || refreshingMetadata || scanning || preparing || updating }
+    private let discoveryLoader: any SourceCatalogLoading
+    private let vendorService: OfficialVendorService
+    private let openExternalURL: (URL) -> Void
+    var busy: Bool { settingUp || refreshingMetadata || refreshingDiscoveryCatalog || scanning || preparing || updating || verifyingVendorResult }
     var preventsQuit: Bool { updating || maintainingSources || refreshingMetadata }
     var setupNeedsAttention: Bool { setupItems.contains { $0.phase.needsAttention } }
     var setupActionTitle: String { setupWasPrepared ? (setupNeedsAttention ? "Retry Setup" : "Prepare Sources Again") : "Prepare Sources" }
@@ -85,8 +94,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    init(runner: any CommandRunning = ProcessRunner(), sourcePaths: [UpdateSource: String]? = nil, setupLocate: @escaping (String) -> String? = ToolLocator.find) {
+    init(runner: any CommandRunning = ProcessRunner(), sourcePaths: [UpdateSource: String]? = nil, discoveryLoader: any SourceCatalogLoading = SourceCatalogLoader(), vendorService: OfficialVendorService = OfficialVendorService(), openExternalURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }, setupLocate: @escaping (String) -> String? = ToolLocator.find) {
         self.runner = runner
+        self.discoveryLoader = discoveryLoader
+        self.vendorService = vendorService; self.openExternalURL = openExternalURL
         self.setupLocate = setupLocate
         self.sourcePaths = sourcePaths
         let override = ProcessInfo.processInfo.environment["UNIFIED_UPDATER_DATA_DIR"]
@@ -97,6 +108,9 @@ final class AppModel: ObservableObject {
         do {
             if FileManager.default.fileExists(atPath: root.appendingPathComponent("preferences.json").path) {
                 preferences = try store.load(Preferences.self, file: "preferences.json")
+            }
+            if FileManager.default.fileExists(atPath: root.appendingPathComponent("vendor-history.json").path) {
+                vendorHistory = try store.load([VendorAssistedRecord].self, file: "vendor-history.json")
             }
             if FileManager.default.fileExists(atPath: root.appendingPathComponent("history.json").path) {
                 history = store.recover(try store.load([ActivityRecord].self, file: "history.json"))
@@ -117,6 +131,46 @@ final class AppModel: ObservableObject {
 
     func prepareSources() {
         runSourceSetup(prepareTools: true)
+    }
+
+    func configureDiscoveryCatalog(_ configuration: DiscoveryCatalogConfiguration?) throws {
+        guard !busy else { throw UpdaterError("Wait for the current operation to finish.") }
+        try configuration?.validate()
+        var updated = preferences; updated.discoveryCatalog = configuration
+        try store.save(updated, file: "preferences.json")
+        preferences = updated
+        discoveryStatus = configuration.map { SourceDiscoveryService(root: cacheRoot.appendingPathComponent("Discovery"), configuration: $0, loader: discoveryLoader).load().status }
+            ?? DiscoveryCatalogStatus(state: .notConfigured, message: "Discovery is disabled. No catalog request will run.")
+        invalidateInventory()
+    }
+    func refreshDiscovery() {
+        guard !busy, let configuration = preferences.discoveryCatalog else { return }
+        refreshingDiscoveryCatalog = true; selected = []; review = []; showingReview = false
+        status = "Refreshing the signed discovery catalog…"
+        Task { [self] in
+            let result = await SourceDiscoveryService(root: cacheRoot.appendingPathComponent("Discovery"), configuration: configuration, loader: discoveryLoader).refresh()
+            discoveryStatus = result.status
+            refreshingDiscoveryCatalog = false
+            scan()
+        }
+    }
+    func reviewDiscoveryChannel(_ channel: String?, for app: AppRecord) {
+        guard !busy else { return }
+        do {
+            var updated = preferences
+            if let channel {
+                guard channel.range(of: #"\A[a-z0-9][a-z0-9._-]{0,31}\z"#, options: .regularExpression) != nil,
+                      let fresh = try? AppInventory().read(app.path), fresh.path == app.path, fresh.bundleID == app.bundleID,
+                      fresh.version == app.version, fresh.build == app.build,
+                      let team = InstalledPublisherIdentity.teamIdentifier(at: app.path) else {
+                    throw UpdaterError("A channel review requires the unchanged application and a valid certificate-signed publisher. Unknown publisher evidence remains provisional.")
+                }
+                if updated.discoveryChannelReviews == nil { updated.discoveryChannelReviews = [:] }
+                updated.discoveryChannelReviews?[app.id] = DiscoveryChannelReview(path: app.path, bundleID: app.bundleID, teamIdentifier: team, channel: channel)
+            } else { updated.discoveryChannelReviews?.removeValue(forKey: app.id) }
+            try store.save(updated, file: "preferences.json"); preferences = updated
+            invalidateInventory(); scan()
+        } catch { self.errorTitle = "Discovery review needs attention"; self.error = Diagnostics.redact(error.localizedDescription) }
     }
 
     func refreshSourceMetadata() {
@@ -179,7 +233,14 @@ final class AppModel: ObservableObject {
         scanning = true; selected.removeAll(); status = "Reading applications and checking sources…"
         let prefs = preferences
         Task { [self] in
-            let result = await ScanService(runner: runner, cacheRoot: cacheRoot, sourcePaths: sourcePaths).scan(preferences: prefs) { [weak self] partial in
+            var service = ScanService(runner: runner, cacheRoot: cacheRoot, sourcePaths: sourcePaths)
+            service.vendorChecker = vendorService
+            if let configuration = prefs.discoveryCatalog {
+                let root = cacheRoot.appendingPathComponent("Discovery")
+                let snapshot = await Task.detached { SourceDiscoveryService(root: root, configuration: configuration).load() }.value
+                discoveryStatus = snapshot.status; service.discoveryCatalog = snapshot.catalog
+            }
+            let result = await service.scan(preferences: prefs) { [weak self] partial in
                 await MainActor.run {
                     self?.apps = partial.apps; self?.sources = partial.sources; self?.warnings = partial.warnings
                 }
@@ -187,6 +248,50 @@ final class AppModel: ObservableObject {
             apps = result.apps; sources = result.sources; warnings = result.warnings; lastScan = result.date
             scanning = false
             status = "Checked \(checkedCount) of \(checkableCount) third-party apps · \(systemAppCount) managed by macOS · \(eligible.count) ready to update"
+        }
+    }
+
+    func prepareVendorUpdate(_ app: AppRecord) {
+        guard !busy, preferences.checkOfficialVendorReleases == true else { return }
+        preparing = true; status = "Rechecking the official vendor release…"
+        let channel = preferences.discoveryChannelReviews?[app.id]
+        Task { [self] in
+            do { vendorReview = try await vendorService.prepareHandoff(app, review: channel) }
+            catch { self.errorTitle = "Vendor handoff needs attention"; self.error = Diagnostics.redact(error.localizedDescription) }
+            preparing = false
+        }
+    }
+    func startVendorHandoff(_ plan: VendorHandoffPlan) {
+        guard !busy, vendorReview?.id == plan.id else { return }
+        do {
+            let updated = Array(([VendorAssistedRecord(plan: plan)] + vendorHistory).prefix(1000))
+            try store.save(updated, file: "vendor-history.json")
+            vendorHistory = updated; vendorPlans[plan.id] = plan
+            let retained = Set(updated.map(\.id)); vendorPlans = vendorPlans.filter { retained.contains($0.key) }
+            vendorReview = nil; status = "Follow the vendor instructions, then close the app and verify the reviewed result in Activity."
+            openExternalURL(plan.instructionsURL)
+        } catch { self.errorTitle = "Couldn’t record the handoff"; self.error = Diagnostics.redact(error.localizedDescription) }
+    }
+    func canVerifyVendorResult(_ id: UUID) -> Bool {
+        vendorPlans[id] != nil && vendorHistory.first(where: { $0.id == id })?.state != .verified
+    }
+    func verifyVendorResult(_ id: UUID) {
+        guard !busy, canVerifyVendorResult(id), let plan = vendorPlans[id] else { return }
+        verifyingVendorResult = true
+        let channel = preferences.discoveryChannelReviews?[plan.app.id]
+        Task { [self] in
+            let result = await vendorService.verify(plan, review: channel)
+            var updated = vendorHistory
+            if let index = updated.firstIndex(where: { $0.id == id }) {
+                updated[index].state = result.0 ? .verified : .notVerified
+                updated[index].message = result.1
+                updated[index].verifiedAt = result.0 ? Date() : nil
+            }
+            do { try store.save(updated, file: "vendor-history.json"); vendorHistory = updated }
+            catch { self.error = Diagnostics.redact(error.localizedDescription) }
+            verifyingVendorResult = false
+            status = result.0 ? "Vendor-assisted target verified; no automatic installation was performed." : "Vendor result needs attention. See Activity."
+            if result.0 { scan() }
         }
     }
 
@@ -316,7 +421,7 @@ final class AppModel: ObservableObject {
         let panel = NSSavePanel(); panel.allowedContentTypes = [.json]; panel.nameFieldStringValue = "maccet-report.json"; panel.title = "Export Maccet report"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            let data = try ReportExport.data(apps: apps, sources: sources, history: history, lastScan: lastScan)
+            let data = try ReportExport.data(apps: apps, sources: sources, history: history, vendorHistory: vendorHistory, lastScan: lastScan)
             try ReportExport.write(data, to: url)
         } catch { self.errorTitle = "Couldn’t export the report"; self.error = error.localizedDescription }
     }

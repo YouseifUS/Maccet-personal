@@ -214,6 +214,44 @@ private enum Checks {
                 try expect(try fixture.app().version == "1.0")
             }
         }
+        await check("Homebrew display targets and package identities remain distinct") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            func metadata(_ package: String) throws -> String {
+                var json = try JSONSerialization.jsonObject(with: Data(fixture.brewJSON(target: package).utf8)) as! [String: Any]
+                var casks = json["casks"] as! [[String: Any]]
+                casks[0]["bundle_short_version"] = "2.0"; casks[0]["bundle_version"] = "20"
+                json["casks"] = casks
+                return String(decoding: try JSONSerialization.data(withJSONObject: json), as: UTF8.self)
+            }
+            let json = try metadata("2000")
+            let candidate = HomebrewAdapter.apply(casks: try HomebrewAdapter.parseCasks(json), outdated: ["example"], to: [try fixture.app()], executable: "/usr/bin/true")[0]
+            try expect(candidate.targetVersion == "2.0" && candidate.targetPackageVersion == "2000" && candidate.targetBuild == "20")
+            let runner = try fixture.runner { try fixture.write(version: "2.0", build: "20") }
+            let original = runner.handler
+            runner.handler = { call in call.args.first == "info" ? CommandResult(output: json) : try original(call) }
+            let engine = UpdateEngine(runner: runner, cacheRoot: fixture.root.appendingPathComponent("Cache"), sourcePaths: [.homebrew: "/usr/bin/true"])
+            let plan = try await engine.prepare([candidate], preferences: Preferences())[0]
+            let changed = HomebrewAdapter.apply(casks: try HomebrewAdapter.parseCasks(metadata("2001")), outdated: ["example"], to: [try fixture.app()], executable: "/usr/bin/true")[0]
+            try expect(changed.releaseIdentity != candidate.releaseIdentity)
+            runner.handler = { call in call.args.first == "info" ? CommandResult(output: try metadata("2001")) : try original(call) }
+            let rejected = await engine.execute(plan, cleanup: true) { _, _ in }
+            try expect(rejected.state == .failed && !runner.calls.contains { $0.args.first == "upgrade" && !$0.args.contains("--dry-run") })
+            runner.handler = { call in call.args.first == "info" ? CommandResult(output: json) : try original(call) }
+            let result = await engine.execute(plan, cleanup: true) { _, _ in }
+            try expect(result.state == .succeeded, result.message)
+        }
+        await check("Explicit Homebrew marketing targets cannot match only a build") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            var casks = try HomebrewAdapter.parseCasks(fixture.brewJSON(target: "2000"))
+            casks[0].displayVersion = "2.0"
+            let candidate = HomebrewAdapter.apply(casks: casks, outdated: ["example"], to: [try fixture.app()], executable: "/usr/bin/true")[0]
+            var after = candidate; after.build = "2.0"
+            try expect(!UpdateEngine.verify(before: candidate, after: after))
+            after.version = "2.0"; after.build = "20"
+            try expect(UpdateEngine.verify(before: candidate, after: after))
+            let current = HomebrewAdapter.apply(casks: casks, outdated: ["example"], to: [after], executable: "/usr/bin/true")[0]
+            try expect(current.state == .current)
+        }
         await check("A catalog name alone cannot claim an application") {
             let fixture = try Fixture(); defer { fixture.clean() }
             var casks = try HomebrewAdapter.parseCasks(fixture.brewJSON())

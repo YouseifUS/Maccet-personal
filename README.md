@@ -163,7 +163,7 @@ Default storage: `~/Library/Application Support/UnifiedUpdater/`.
 - `history.json`: up to 1,000 recent update records.
 - `SourceCache/`: source metadata and isolated update attempts.
 
-Explicit source preparation contacts GitHub, Homebrew, MacPorts, and Apple services to obtain and verify dependencies. Application checks contact source services. There is no analytics service or separate inventory-upload backend. Reports are exported only to a location you choose. Diagnostic strings redact home paths and common credential-bearing URL values; review any report before sharing it.
+Explicit source preparation contacts GitHub, Homebrew, MacPorts, and Apple services to obtain and verify dependencies. Application checks contact source services. There is no analytics service or separate inventory-upload backend. Reports are exported only to a location you choose. Report contents are written to a new same-directory file with explicit POSIX mode 0600 before atomic publication, including when replacing an existing report. A failed write leaves the previous destination intact. Diagnostic strings redact home paths and common credential-bearing URL values; review any report before sharing it.
 
 Subprocess stdout and stderr are drained independently through anonymous pipes. Only the first 16 MiB of each stream are retained in memory; raw process captures are not written to disk. Excess output is drained and discarded while the command continues. After it exits, an oversized result is rejected with its exit status and a sanitized diagnostic prefix, rather than parsed as complete. Output volume does not terminate an installer. Inherited output descriptors do not delay the owned command or retain its captured buffers after completion.
 

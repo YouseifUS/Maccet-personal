@@ -121,19 +121,56 @@ private final class SetupFixture {
 @main
 private enum Checks {
     static func main() async {
-        if CommandLine.arguments.contains("--inspect-output-permissions") {
-            var paths: [String] = []
+        if CommandLine.arguments.contains("--inspect-output-transport") {
             for descriptor in [STDOUT_FILENO, STDERR_FILENO] {
-                var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-                guard fcntl(descriptor, F_GETPATH, &path) != -1 else { exit(2) }
-                paths.append(String(cString: path))
-            }
-            let locations = [URL(fileURLWithPath: paths[0]).deletingLastPathComponent().path] + paths
-            for path in locations {
-                guard let attributes = try? FileManager.default.attributesOfItem(atPath: path), let mode = attributes[.posixPermissions] as? NSNumber else { exit(2) }
-                print(String(mode.intValue & 0o777, radix: 8))
+                var info = stat()
+                guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFIFO else { exit(2) }
+                print("pipe")
             }
             return
+        }
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--stream-process-output" {
+            do {
+                let root = URL(fileURLWithPath: CommandLine.arguments[2])
+                try FileHandle.standardError.write(contentsOf: Data("Useful fixture context: Bearer SYNTHETIC_BEARER\n".utf8))
+                let chunk = Data(repeating: 65, count: 64 * 1024)
+                for phase in 0..<2 {
+                    for _ in 0..<320 {
+                        try FileHandle.standardOutput.write(contentsOf: chunk)
+                        try FileHandle.standardError.write(contentsOf: chunk)
+                    }
+                    if phase == 0 {
+                        try Data().write(to: root.appendingPathComponent("ready"))
+                        for _ in 0..<500 {
+                            if FileManager.default.fileExists(atPath: root.appendingPathComponent("continue").path) { break }
+                            Thread.sleep(forTimeInterval: 0.01)
+                        }
+                    }
+                }
+                try Data().write(to: root.appendingPathComponent("finished"))
+                return
+            } catch { exit(2) }
+        }
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--delayed-process-output" {
+            for _ in 0..<500 {
+                if FileManager.default.fileExists(atPath: CommandLine.arguments[2] + ".continue") { break }
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+            do {
+                try FileHandle.standardOutput.write(contentsOf: Data("late".utf8))
+                try Data().write(to: URL(fileURLWithPath: CommandLine.arguments[2]))
+            } catch { exit(2) }
+            return
+        }
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--inherited-process-output" {
+            do {
+                let child = Process(); child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+                child.arguments = ["--delayed-process-output", CommandLine.arguments[2]]
+                child.standardOutput = FileHandle.standardOutput; child.standardError = FileHandle.standardError
+                try child.run()
+                try FileHandle.standardOutput.write(contentsOf: Data("done".utf8))
+                return
+            } catch { exit(2) }
         }
         var passed = 0
         var failures: [String] = []
@@ -591,7 +628,7 @@ private enum Checks {
             try expect(result.status == 7 && result.output == "hello" && result.errorOutput == "error")
             try expectThrows { _ = try result.checked() }
         }
-        await check("Captured output is private under permissive and restrictive process masks") {
+        await check("Raw output stays in anonymous pipes under permissive and restrictive process masks") {
             // These checks run serially; restore the process-wide test mask even
             // if the assertion fails. No production code changes the user's mask.
             let originalMask = umask(0o000)
@@ -599,10 +636,54 @@ private enum Checks {
             let masks: [mode_t] = [0o000, 0o022, 0o077]
             for mask in masks {
                 umask(mask)
-                let result = try await ProcessRunner().run(URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.path, ["--inspect-output-permissions"], environment: [:], timeout: 5)
+                let result = try await ProcessRunner().run(URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.path, ["--inspect-output-transport"], environment: [:], timeout: 5)
                 try expect(result.status == 0)
-                try expect(result.output.split(whereSeparator: \.isNewline).map(String.init) == ["700", "600", "600"], "Raw process capture was not private under mask " + String(mask, radix: 8))
+                try expect(result.output.split(whereSeparator: \.isNewline).map(String.init) == ["pipe", "pipe"], "Raw process capture was not private under mask " + String(mask, radix: 8))
             }
+        }
+        await check("Continuously growing output stays bounded while the child safely finishes") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let fm = FileManager.default
+            func captures() throws -> [URL] {
+                try fm.contentsOfDirectory(at: fm.temporaryDirectory, includingPropertiesForKeys: nil).filter { $0.lastPathComponent.hasPrefix("unified-updater-") }
+            }
+            let existing = Set(try captures())
+            let operation = Task { () -> String in
+                do {
+                    _ = try await ProcessRunner().run(URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.path, ["--stream-process-output", fixture.root.path], environment: [:], timeout: nil)
+                    return ""
+                } catch { return error.localizedDescription }
+            }
+            for _ in 0..<500 {
+                if fm.fileExists(atPath: fixture.root.appendingPathComponent("ready").path) { break }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            var maximumCaptureSize = 0
+            for folder in try captures() where !existing.contains(folder) {
+                for stream in ["stdout", "stderr"] {
+                    let attributes = try fm.attributesOfItem(atPath: folder.appendingPathComponent(stream).path)
+                    maximumCaptureSize = max(maximumCaptureSize, (attributes[.size] as? NSNumber)?.intValue ?? 0)
+                }
+            }
+            try Data().write(to: fixture.root.appendingPathComponent("continue"))
+            let message = await operation.value
+            try expect(fm.fileExists(atPath: fixture.root.appendingPathComponent("ready").path) && fm.fileExists(atPath: fixture.root.appendingPathComponent("finished").path), "Output policy interrupted the child")
+            try expect(maximumCaptureSize <= 16 * 1024 * 1024, "Capture exceeded the limit while the child was still running")
+            try expect(message.contains("exceeded") && message.contains("exit status 0") && message.contains("Useful fixture context"))
+            try expect(!message.contains("SYNTHETIC_BEARER"), "Overflow diagnostics leaked a credential")
+        }
+        await check("Inherited output descriptors do not delay the owned command or break descendants") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let marker = fixture.root.appendingPathComponent("descendant-finished")
+            let result = try await ProcessRunner().run(URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.path, ["--inherited-process-output", marker.path], environment: [:], timeout: 5)
+            try expect(result.status == 0 && result.output == "done")
+            try expect(!FileManager.default.fileExists(atPath: marker.path), "Runner waited for an unrelated inherited descriptor")
+            try Data().write(to: URL(fileURLWithPath: marker.path + ".continue"))
+            for _ in 0..<200 {
+                if FileManager.default.fileExists(atPath: marker.path) { break }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            try expect(FileManager.default.fileExists(atPath: marker.path), "Closing capture broke the descendant")
         }
         await check("Read-only commands have a bounded timeout") {
             do {

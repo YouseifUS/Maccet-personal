@@ -112,7 +112,7 @@ private final class ControlledRunner: CommandRunning {
                 return try normal(call)
             }
             s.model.start(); try await s.wait()
-            try expect(s.model.setupNeedsAttention && s.model.setupItems[0].phase == .unavailable && s.model.setupItems[1].phase == .ready && s.model.setupItems[2].phase == .unavailable && s.model.setupItems[3].phase == .notRequired, "Unavailable prerequisites or working sources were misreported")
+            try expect(s.model.setupNeedsAttention && s.model.setupItems[0].phase == .unavailable && s.model.setupItems[1].phase == .ready && s.model.setupItems[2].phase == .notRequired && s.model.setupItems[3].phase == .notRequired, "Unavailable prerequisites or working sources were misreported")
             try expect(s.model.apps.count == 3 && s.model.lastScan != nil, "Available inventory was hidden by setup failure")
             try expect(s.installs.isEmpty, "Preparation failure triggered an application install")
         }

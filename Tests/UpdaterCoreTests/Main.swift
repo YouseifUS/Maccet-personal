@@ -533,6 +533,124 @@ private enum Checks {
                 try expectThrows { try changed.validate() }
             }
         }
+        await check("Chrome release selection excludes unserved, ended and future releases and rejects incomplete identities") {
+            let active = vendorRelease("2.0.0.0")
+            let rows = [vendorRelease("9.0.0.0", fraction: 0), active, vendorRelease("8.0.0.0", end: "2025-01-01T00:00:00Z"), vendorRelease("7.0.0.0", start: "2099-01-01T00:00:00Z")]
+            try expect(OfficialVendorService.latestRelease(vendorJSON(rows), platform: "mac_arm64", channel: "stable") == "2.0.0.0")
+            for bytes in [try vendorJSON([vendorRelease("2.0.0.0", channel: "beta")]), try vendorJSON([vendorRelease("bad")]), try vendorJSON([vendorRelease("2.0.0.0", fraction: 2)]), try vendorJSON([active], token: "more"), try vendorJSON(Array(repeating: active, count: 257)), Data(repeating: 65, count: 512 * 1024 + 1)] {
+                try expectThrows { _ = try OfficialVendorService.latestRelease(bytes, platform: "mac_arm64", channel: "stable") }
+            }
+        }
+        await check("Bounded Mach-O inspection identifies thin and universal architectures without launching an executable") {
+            func word(_ value: UInt32) -> [UInt8] { [UInt8(truncatingIfNeeded: value >> 24), UInt8(truncatingIfNeeded: value >> 16), UInt8(truncatingIfNeeded: value >> 8), UInt8(truncatingIfNeeded: value)] }
+            let thin = Data([0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 1])
+            try expect(ExecutableArchitecture.parse(thin) == [.arm64])
+            var universal = word(0xcafebabe) + word(2)
+            universal += word(0x0100000c) + Array(repeating: 0, count: 16)
+            universal += word(0x01000007) + Array(repeating: 0, count: 16)
+            try expect(ExecutableArchitecture.parse(Data(universal)) == [.arm64, .x86_64])
+            for bad in [Data(), Data(universal.prefix(12)), Data(word(0xcafebabe) + word(100)), Data("not Mach-O".utf8)] {
+                try expectThrows { _ = try ExecutableArchitecture.parse(bad) }
+            }
+        }
+        await check("Official vendor checks require pinned publisher, explicit per-copy channel and supported architecture") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            func write(_ version: String) throws {
+                try fixture.write(version: version, build: version)
+                let url = fixture.appURL.appendingPathComponent("Contents/Info.plist")
+                var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: url), format: nil) as! [String: Any]
+                info["CFBundleIdentifier"] = "com.google.Chrome"
+                try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: url)
+            }
+            try write("1.0.0.0")
+            let app = try fixture.app()
+            let loader = FixtureVendorLoader(bytes: try vendorJSON([vendorRelease("2.0.0.0")]))
+            let service = OfficialVendorService(loader: loader, validateIdentity: { _ in }, architectures: { _ in [.arm64] })
+            let unknown = await service.check(app, review: nil)
+            try expect(unknown.state == .unsupported && loader.urls.isEmpty)
+            let review = DiscoveryChannelReview(path: app.path, bundleID: app.bundleID, teamIdentifier: "EQHXZ8M8AV", channel: "stable")
+            let valid = await service.check(app, review: review)
+            try expect(valid.state == .updateAvailable && valid.targetVersion == "2.0.0.0" && valid.platform == "mac_arm64")
+            try expect(loader.urls[0].host == "versionhistory.googleapis.com" && loader.urls[0].absoluteString.contains("fraction%3E0"))
+            let denied = await OfficialVendorService(loader: loader).check(app, review: review)
+            try expect(denied.state == .unsupported && loader.urls.count == 1, "Unsigned fixture reached the official vendor endpoint")
+            let wrongArchitecture = OfficialVendorService(loader: loader, nativeArchitecture: .x86_64, validateIdentity: { _ in }, architectures: { _ in [.arm64] })
+            let incompatible = await wrongArchitecture.check(app, review: review)
+            try expect(incompatible.state == .unsupported && loader.urls.count == 1)
+            var copyReview = review; copyReview.path = fixture.root.appendingPathComponent("Other.app").path
+            let wrongCopy = await service.check(app, review: copyReview)
+            try expect(wrongCopy.state == .unsupported && loader.urls.count == 1)
+            try write("2.0.0.0")
+            let current = await service.check(try fixture.app(), review: review)
+            try expect(current.state == .current)
+        }
+        await check("Vendor handoffs recheck targets, verify independently and reject changed paths, receipts, channels or architecture") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            func write(_ version: String, bundle: String = "com.google.Chrome") throws {
+                try fixture.write(version: version, build: version)
+                let url = fixture.appURL.appendingPathComponent("Contents/Info.plist")
+                var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: url), format: nil) as! [String: Any]
+                info["CFBundleIdentifier"] = bundle
+                try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: url)
+            }
+            try write("1.0.0.0")
+            var app = try fixture.app()
+            let loader = FixtureVendorLoader(bytes: try vendorJSON([vendorRelease("2.0.0.0")]))
+            var architecture: Set<CatalogArchitecture> = [.arm64]
+            var running = false
+            let service = OfficialVendorService(loader: loader, validateIdentity: { _ in }, architectures: { _ in architecture }, isRunning: { _ in running })
+            let review = DiscoveryChannelReview(path: app.path, bundleID: app.bundleID, teamIdentifier: "EQHXZ8M8AV", channel: "stable")
+            app.vendorObservation = await service.check(app, review: review)
+            let plan = try await service.prepareHandoff(app, review: review)
+            let unchanged = await service.verify(plan, review: review); try expect(!unchanged.0)
+            loader.bytes = try vendorJSON([vendorRelease("3.0.0.0")])
+            do { _ = try await service.prepareHandoff(app, review: review); throw CheckFailure(description: "Changed vendor target passed review") }
+            catch is UpdaterError { }
+            try write("2.0.0.0")
+            running = true; let active = await service.verify(plan, review: review); try expect(!active.0)
+            running = false
+            let verified = await service.verify(plan, review: review); try expect(verified.0)
+            let barrier = InstallBarrier()
+            let intercepted = FakeRunner { _ in throw UpdaterError("No command should run") }
+            let owned = Task {
+                await UpdateEngine(runner: intercepted, sourcePaths: [:]).execute(PlannedUpdate(app: app, preview: ""), cleanup: false) { stage, _ in
+                    if stage == .preflight {
+                        await barrier.enter()
+                        while !(await barrier.released) { try await Task.sleep(nanoseconds: 1_000_000) }
+                    }
+                }
+            }
+            while !(await barrier.entered) { try await Task.sleep(nanoseconds: 1_000_000) }
+            let conflict = await service.verify(plan, review: review)
+            await barrier.release(); _ = await owned.value
+            try expect(!conflict.0 && intercepted.calls.isEmpty, "Vendor verification bypassed application ownership")
+            architecture = [.x86_64]; let wrongArch = await service.verify(plan, review: review); try expect(!wrongArch.0)
+            architecture = [.arm64]
+            var changedReview = review; changedReview.channel = "beta"
+            let changedChannel = await service.verify(plan, review: changedReview); try expect(!changedChannel.0)
+            try write("2.0.0.0", bundle: "other.bundle")
+            let changedIdentity = await service.verify(plan, review: review); try expect(!changedIdentity.0)
+            try write("2.0.0.0")
+            let receipt = fixture.appURL.appendingPathComponent("Contents/_MASReceipt")
+            try FileManager.default.createDirectory(at: receipt, withIntermediateDirectories: true)
+            try Data().write(to: receipt.appendingPathComponent("receipt"))
+            let changedReceipt = await service.verify(plan, review: review); try expect(!changedReceipt.0)
+            try FileManager.default.removeItem(at: receipt)
+            let moved = fixture.root.appendingPathComponent("Moved.app")
+            try FileManager.default.moveItem(at: fixture.appURL, to: moved)
+            try FileManager.default.createSymbolicLink(at: fixture.appURL, withDestinationURL: moved)
+            let changedPath = await service.verify(plan, review: review); try expect(!changedPath.0)
+        }
+        await check("Vendor identity requirement rejects unsigned and ad-hoc bundles without treating the requirement as malformed") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            for signed in [false, true] {
+                if signed { try fixture.sign() }
+                do {
+                    try DeveloperIDValidation.validate(path: fixture.appURL.path, bundleID: "com.google.Chrome", team: "EQHXZ8M8AV")
+                    throw CheckFailure(description: "Untrusted vendor signature passed")
+                } catch let error as UpdaterError { try expect(error.message.contains("does not satisfy"), error.message) }
+            }
+        }
         await check("Signed catalogs retain known-good data and reject unknown publishers and rollback") {
             let fixture = try Fixture(); defer { fixture.clean() }
             let now = Date(); let key = Curve25519.Signing.PrivateKey(); let other = Curve25519.Signing.PrivateKey()

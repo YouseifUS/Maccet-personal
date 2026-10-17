@@ -1,7 +1,11 @@
 import Foundation
 
 /// Shared bounded read-only transport. Publisher authenticity is established by consumers.
-public struct BoundedMetadataLoader {
+public protocol MetadataLoading {
+    func load(_ url: URL, maximumBytes: Int, mimeTypes: [String]) async throws -> Data
+}
+
+public struct BoundedMetadataLoader: MetadataLoading {
     private var protocolClasses: [AnyClass]?
     public init() {}
     @_spi(Testing) public init(protocolClasses: [AnyClass]) { self.protocolClasses = protocolClasses }

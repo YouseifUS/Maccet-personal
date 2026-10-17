@@ -85,6 +85,17 @@ struct AppDetailSheet: View {
                         StatusPill(title: current.state.title, tone: .forCheck(current.state))
                         Text(current.detail).font(.system(size: 13)).foregroundStyle(Maccet.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                     }
+                    if OfficialVendorService.recognizes(current), current.source == nil, !current.hasStoreReceipt, (current.routes ?? []).isEmpty {
+                        detailSection("Official vendor check") {
+                            Text(current.vendorObservation?.message ?? "Enable supported vendor checks in Sources, then confirm this copy's channel from Chrome's settings or administrator policy.")
+                                .font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                            Picker("Installed Chrome channel", selection: Binding(get: { model.preferences.discoveryChannelReviews?[current.id]?.channel }, set: { model.reviewDiscoveryChannel($0, for: current) })) {
+                                Text("Unknown — do not assume Stable").tag(nil as String?)
+                                ForEach(OfficialVendorService.channels, id: \.self) { Text($0.capitalized).tag(Optional($0)) }
+                            }.disabled(model.busy)
+                            Link("Official Chrome update instructions", destination: OfficialVendorService.instructionsURL).font(.system(size: 12))
+                        }
+                    }
                     if let candidates = current.catalogCandidates, !candidates.isEmpty {
                         detailSection("Discovery candidates") {
                             ForEach(candidates) { candidate in
@@ -143,6 +154,8 @@ struct AppDetailSheet: View {
     @ViewBuilder private var trailingAction: some View {
         if model.preferences.isEligible(current) {
             Button("Review Update") { let candidate = current; dismiss(); model.prepare([candidate]) }.buttonStyle(PrimaryButtonStyle()).disabled(model.busy)
+        } else if current.vendorObservation?.state == .updateAvailable {
+            Button("Review Assisted Update") { let candidate = current; dismiss(); model.prepareVendorUpdate(candidate) }.buttonStyle(PrimaryButtonStyle()).disabled(model.busy)
         } else if current.source != nil || current.hasStoreReceipt { Button("Open Source") { model.openSource(for: current) } }
     }
     private func detailSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
@@ -203,5 +216,27 @@ struct DiscoveryCatalogSheet: View {
                 endpoint = current.endpoint.absoluteString; keyID = current.keyID; publicKey = current.publicKey; minimumRevision = String(current.minimumRevision)
             }
         }
+    }
+}
+
+struct VendorHandoffSheet: View {
+    @EnvironmentObject var model: AppModel
+    let plan: VendorHandoffPlan
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Review vendor-assisted update").font(.title2.weight(.semibold))
+            Text(plan.app.name).font(.headline)
+            Text("\(plan.app.version) → \(plan.targetVersion) · \(plan.channelReview.channel)").font(.system(size: 13, design: .monospaced))
+            Text(plan.app.path).font(.system(size: 11, design: .monospaced)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            Text("Maccet will open Google's instructions and record this reviewed target. In Chrome, use Help → About Google Chrome, confirm compatibility and any managed policy, then complete the update. Save your work before relaunching Chrome. Close the application before choosing Verify Reviewed Result in Activity.")
+                .font(.system(size: 13)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+            Text("This is a guided handoff. Maccet does not run a vendor installer, change Chrome policies or clean its downloads.")
+                .font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Cancel") { model.vendorReview = nil }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Record Handoff and Open Instructions") { model.startVendorHandoff(plan) }.keyboardShortcut(.defaultAction)
+            }
+        }.padding(24).frame(width: 620)
     }
 }

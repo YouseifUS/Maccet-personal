@@ -2,6 +2,12 @@
 
 Current local alpha: **0.1.2**. The latest focused validation is recorded first; older sections retain the observations and test counts from their original validation dates. Current source readiness and preparation behavior is documented in [STARTUP_SETUP.md](STARTUP_SETUP.md).
 
+## Bounded live subprocess capture — 17 October 2026
+
+The runner now uses independent bounded in-memory pipe collectors instead of disk captures. The earlier file-permission evidence below describes the preceding implementation. Each stream retains at most 16 MiB; excess bytes are discarded while the child continues. An oversized result is rejected after the owned child exits, with sanitized context and its exit status. Existing installer invocations retain their `timeout: nil` policy.
+
+The live regression pauses a disposable child after 20 MiB on each stream, checks capture disk usage while it is still running, then lets it write another 20 MiB per stream and finish. The old runner exceeded the limit during the pause. The updated tests also cover anonymous-pipe privacy under different process masks, inherited descendant descriptors, nonzero exit status and read-only timeouts. This is bounded-capture evidence, not a real installer acceptance run.
+
 ## Private subprocess capture — 17 October 2026
 
 The repository's `ProcessRunner` created temporary output directories and files

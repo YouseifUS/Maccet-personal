@@ -18,7 +18,15 @@ For example, a verified Homebrew route and a verified MacPorts route can both be
 
 This release aggregates **installed-manager ownership results**, not the entire public catalogs of every manager. A matching catalog name cannot take over an existing application. Cross-catalog discovery and reviewed ownership transfer remain separate work.
 
-Every GUI launch checks readiness of the applicable enabled source tools before checking applications. Missing tools appear as **Unavailable**; launch does not install tools, refresh their indexes, or request administrator authorization. Choose **Sources → Prepare Sources** to install missing tools and maintain required sources. Partial preparation failures offer **Retry Setup**, while available sources can still check apps. See [source readiness and preparation](docs/STARTUP_SETUP.md) for prerequisites, authorization, and platform limitations.
+Every GUI launch checks readiness of the applicable enabled source tools before checking applications. Missing tools appear as **Unavailable**; launch does not install tools, refresh their indexes, or request administrator authorization. Readiness and source scans require recognized stable version output, with validated numeric versions stored separately from diagnostic text. The Homebrew 6 baseline includes [the scoped `--no-quit` upgrade option](https://github.com/Homebrew/brew/blob/6.0.0/Library/Homebrew/cmd/upgrade.rb). MacPorts 2.8.1 is the conservative [command-format baseline](https://github.com/macports/macports-base/blob/v2.8.1/src/port/port.tcl); mas 7 supplies identity/path-aware store checking. These minimums do not certify every operating-system and architecture combination. Unknown output and unsupported older versions require preparation or a manual tool update.
+
+MacPorts is optional. Preparation uses an existing manager, known MacPorts ownership, an App Store helper that needs MacPorts maintenance, or the **Include optional MacPorts installation** choice in Sources. That choice applies to preparation in the current session and respects disabled sources and inventory relevance. A previous successful MacPorts preparation remains evidence for an explicit retry if its tool disappears. Unknown/direct-download inventories do not install a missing MacPorts manager automatically, and unclaimed applications remain **Not checked**.
+
+A working App Store helper is checked directly during launch; its package manager and Apple developer tools are required only when the chosen maintenance action needs them. Missing or broken helpers still require attention.
+
+Choose **Sources → Refresh Metadata** to request package data with installed tools and then rescan applications. Homebrew uses API refresh flags with Git/tool auto-update disabled; MacPorts uses `port sync`. Results and last-attempt time are separate from tool-preparation results. Homebrew can reuse verified cached data when upstream is unavailable, so a completed request is not a freshness guarantee; Git-tap-only mode reports an unsupported request instead of broadening into tool maintenance.
+
+Choose **Sources → Prepare Sources** to install missing tools and maintain required sources. Partial preparation failures offer **Retry Setup**, while available sources can still check apps. See [source readiness and preparation](docs/STARTUP_SETUP.md) for prerequisites, authorization, and platform limitations.
 
 Installing a manager does not make it the owner of existing direct-download applications. Coverage still depends on verified ownership; a missing or failed source cannot claim complete coverage.
 
@@ -47,10 +55,16 @@ Installing a manager does not make it the owner of existing direct-download appl
 ## Requirements
 
 - macOS 13 or later is the deployment target. See [validation notes](docs/VALIDATION.md) for what was actually exercised.
-- Homebrew in `/opt/homebrew/bin/brew` or `/usr/local/bin/brew` for managed casks.
-- MacPorts at `/opt/local/bin/port` for MacPorts-managed apps.
+- Homebrew 6+ in `/opt/homebrew/bin/brew` or `/usr/local/bin/brew` for managed casks.
+- Optional MacPorts 2.8.1+ at `/opt/local/bin/port` for MacPorts-managed apps.
 - `mas` 7+ under `/opt/homebrew/bin`, `/usr/local/bin`, or `/opt/local/bin` for identity-based store checks.
 - A suitable App Store account and any required macOS authorization for store updates.
+
+Readiness and source scans require recognized stable version output, with validated numeric versions stored separately from diagnostic text. The Homebrew 6 baseline includes [the scoped `--no-quit` upgrade option](https://github.com/Homebrew/brew/blob/6.0.0/Library/Homebrew/cmd/upgrade.rb). MacPorts 2.8.1 is the conservative [command-format baseline](https://github.com/macports/macports-base/blob/v2.8.1/src/port/port.tcl); mas 7 supplies identity/path-aware store checking. These minimums do not certify every operating-system and architecture combination. Unknown output and unsupported older versions require preparation or a manual tool update.
+
+MacPorts is optional. Preparation uses an existing manager, known MacPorts ownership, an App Store helper that needs MacPorts maintenance, or the **Include optional MacPorts installation** choice in Sources. That choice applies to preparation in the current session and respects disabled sources and inventory relevance. A previous successful MacPorts preparation remains evidence for an explicit retry if its tool disappears. Unknown/direct-download inventories do not install a missing MacPorts manager automatically, and unclaimed applications remain **Not checked**.
+
+A working App Store helper is checked directly during launch; its package manager and Apple developer tools are required only when the chosen maintenance action needs them. Missing or broken helpers still require attention.
 
 Choose **Sources → Prepare Sources** to install and update these dependencies. Fresh automatic Homebrew installation currently requires Apple Silicon; Intel users must install Homebrew once using its official instructions. During explicit preparation, missing Apple developer tools open Apple's system installer; finish that installer and choose **Retry Setup**. Installer availability and upstream OS support can further limit setup on older macOS versions. Inventory and available sources remain usable if setup fails. Official instructions: [Homebrew](https://docs.brew.sh/Installation), [MacPorts](https://www.macports.org/install.php), and [mas](https://github.com/mas-cli/mas).
 
@@ -77,26 +91,36 @@ Explicit source preparation installs or updates the source tools themselves, inc
 | App Store | Store inventory and update actions using the same shared queue |
 | Activity | Live task stages, persisted update attempts, verification and failure explanations, rescan before retry |
 | Cleanup | Cleanup policy and per-attempt results; no broad delete action |
-| Sources | Readiness and explicit preparation results, retry, canonical paths, versions, errors, scan enable/disable, and documentation |
+| Sources | Separate metadata requests and tool preparation, per-source results, retry, canonical paths, versions, errors, scan controls, and documentation |
 | Settings | Application folders, exclusion reset, and privacy/behavior information |
 
 Right-click an app for details, Reveal in Finder, Ignore App, or Skip This Release. **Show ignored** reveals excluded entries; **Settings → Reset All Exclusions** restores them.
 
+## Source-mapping trust foundation
+
+The core defines versioned identity/channel/domain/capability evidence and authenticates supplied catalogs with client-pinned Ed25519 keys, revision/expiry checks and a retained known-good cache. Catalog evidence alone cannot authorize automatic installation. See [the wire format and trust boundary](docs/SOURCE-MAPPING-TRUST.md). No production publisher key or remote catalog endpoint is configured; broad discovery remains separate work.
+
 ## Update and cleanup behavior
+
+Only one Maccet operation can own a canonical application path for the current user at a time, across engines, separate app instances and separate download caches. Another attempt is deferred before source commands or cache creation; unrelated apps remain independent. Ownership spans preflight, installation, verification and cleanup. macOS releases the lock if its owner exits, but Maccet never retries the installation automatically: rescan and review after interruption. Other package-manager clients do not participate in this Maccet ownership protocol.
+
+Review also records the canonical destination of the selected update tool. Changing a tool symlink after review requires a new scan and plan; the destination is checked again at installation boundaries. This detects destination changes, not in-place binary replacement, library changes or an external retarget in the interval after a check.
 
 Homebrew updates are scoped to a named cask with `--no-quit` and `--skip-cask-deps`. Homebrew's automatic cleanup is disabled for these invocations. A dry run is shown before execution. Homebrew can still perform its own necessary installation actions, such as binary linking; related changes reported by its preview are visible in the review sheet.
 
-The first alpha supports automatic updates for simple, specifically versioned app casks whose target metadata can be verified. Pinned, disabled, complex installer, non-numeric vendor-version, and ambiguous cases require manual attention. Apps installed outside Homebrew are not silently adopted, even if they appear in its catalog.
+The first alpha supports automatic updates for simple, specifically versioned app casks whose target metadata can be verified. A complete SHA-256 package digest is required and must remain unchanged through review and both preflight checks. Missing, malformed, and `no_check` digests require manual attention, as do pinned, disabled, complex installer, non-numeric vendor-version, and ambiguous cases. Apps installed outside Homebrew are not silently adopted, even if they appear in its catalog.
+
+Update review captures code-signature evidence. Signed applications must pass strict resource, nested-code and architecture validation before installation and after the target metadata matches. Certificate-signed replacements must satisfy the reviewed designated requirement, signing identifier and team identity. Ad-hoc signatures establish integrity and a signing identifier, without certifying a publisher. Applications already unsigned at review remain supported without a publisher-authenticity claim; a newly signed replacement must validate. Invalid signatures or changed reviewed signing identities prevent success and retain the attempt's artifacts. These are point-in-time checks, not a guarantee against concurrent external changes or a substitute for Gatekeeper/notarization.
 
 App Store operations use a fixed `mas` executable and validated numeric store ID. The app does not collect or store your Apple Account or administrator password. If a store operation fails, open App Store from the app row and resolve the issue there.
 
-For Homebrew, each update attempt gets a separate cache folder under this app's local data directory. After the reviewed target is verified, only that attempt's cache is eligible for automatic removal. Failed or unverified attempts retain their artifacts. Disabling cleanup retains successful-attempt files too.
+For Homebrew, each update attempt gets a separate cache folder under this app's local data directory. After the reviewed target is verified, only that attempt's download and temporary-log files are eligible for automatic removal. Cleanup retains the directory structure and ownership marker, so a late directory-name swap cannot redirect recursive deletion. Failed or unverified attempts retain their artifacts. Disabling cleanup retains successful-attempt files too.
 
 Shared Homebrew caches, general app caches, user preferences, licenses, and documents are preserved. App Store manages its own downloads. The app does not invoke `brew cleanup`, `uninstall`, `zap`, or a global cache deletion command. This deliberately limits cleanup coverage in this alpha.
 
 **Cancel Remaining** cancels queued work and prevents installation when cancellation arrives before the install stage. An active installation is allowed to finish safely; it is not forcibly terminated. Independent failures do not stop the rest of a valid queue. macOS may show an authorization dialog for each store update.
 
-MacPorts checks use the existing local ports index; the UI labels that limitation. **Prepare Sources** runs `port -N selfupdate` with macOS authorization before rescanning. Launch and diagnostic scans use the existing local index. An update preview uses `port -y -N upgrade <name>`; the reviewed installation uses one named package and may update required dependencies shown in the preview. macOS authorization is requested for the standard root-owned installation. Shared MacPorts caches and inactive versions are retained. Revision-only and incomparable vendor changes require manual verification.
+MacPorts checks use the existing local ports index; the UI labels that limitation. **Refresh Metadata** runs `port -N sync` for index data; **Prepare Sources** runs `port -N selfupdate`, which can also update MacPorts itself, with macOS authorization before rescanning. Launch and diagnostic scans use the existing local index. An update preview uses `port -y -N upgrade <name>`; the reviewed installation uses one named package and may update required dependencies shown in the preview. macOS authorization is requested for the standard root-owned installation. Shared MacPorts caches and inactive versions are retained. Revision-only and incomparable vendor changes require manual verification.
 
 ## Build from source
 
@@ -143,9 +167,9 @@ Default storage: `~/Library/Application Support/UnifiedUpdater/`.
 - `history.json`: up to 1,000 recent update records.
 - `SourceCache/`: source metadata and isolated update attempts.
 
-Explicit source preparation contacts GitHub, Homebrew, MacPorts, and Apple services to obtain and verify dependencies. Application checks contact source services. There is no analytics service or separate inventory-upload backend. Reports are exported only to a location you choose. Diagnostic strings redact home paths and common credential-bearing URL values; review any report before sharing it.
+Explicit source preparation contacts GitHub, Homebrew, MacPorts, and Apple services to obtain and verify dependencies. Application checks contact source services. There is no analytics service or separate inventory-upload backend. Reports are exported only to a location you choose. Report contents are written to a new same-directory file with explicit POSIX mode 0600 before atomic publication, including when replacing an existing report. A failed write leaves the previous destination intact. Diagnostic strings redact home paths and common credential-bearing URL values; review any report before sharing it.
 
-Subprocess output is captured in a private directory (0700) with owner-only stdout/stderr files (0600), created before the command starts. These temporary captures are removed when the runner finishes. File permissions protect raw output while it awaits diagnostic redaction.
+Subprocess stdout and stderr are drained independently through anonymous pipes. Only the first 16 MiB of each stream are retained in memory; raw process captures are not written to disk. Excess output is drained and discarded while the command continues. After it exits, an oversized result is rejected with its exit status and a sanitized diagnostic prefix, rather than parsed as complete. Output volume does not terminate an installer. Inherited output descriptors do not delay the owned command or retain its captured buffers after completion.
 
 If the app closes during an operation, active history entries become **Interrupted** on next launch. No operation is automatically retried and no artifacts are automatically deleted during recovery. Rescan first to inspect the installed state.
 

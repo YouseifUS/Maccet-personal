@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public enum ToolLocator {
     public static func find(_ name: String) -> String? {
@@ -38,6 +39,7 @@ public struct BrewCask {
     public var macOSMinimum: String?
     public var displayVersion: String?
     public var buildVersion: String?
+    public var sha256: String?
 }
 
 public struct HomebrewAdapter {
@@ -84,7 +86,8 @@ public struct HomebrewAdapter {
             return BrewCask(token: token, version: version, installed: installed, targets: targets,
                 simpleApp: targets.count == 1 && !complex, pinned: value["pinned"] as? Bool ?? false,
                 disabled: value["disabled"] as? Bool ?? false, macOSMinimum: minimum,
-                displayVersion: value["bundle_short_version"] as? String, buildVersion: value["bundle_version"] as? String)
+                displayVersion: value["bundle_short_version"] as? String, buildVersion: value["bundle_version"] as? String,
+                sha256: (value["sha256"] as? String)?.lowercased())
         }
     }
     public static func parseOutdated(_ text: String) throws -> Set<String> {
@@ -124,9 +127,9 @@ public struct HomebrewAdapter {
                 app.state = .newerInstalled; app.detail = "The installed app is newer than Homebrew's catalog."; return app
             }
             let versionMatches: Bool
-            if let display = cask.displayVersion, let build = cask.buildVersion {
+            if let display = cask.displayVersion {
                 versionMatches = ReleaseComparison.compare(app.version, display) == .orderedSame
-                    && ReleaseComparison.compare(app.build, build) == .orderedSame
+                    && (cask.buildVersion.map { ReleaseComparison.compare(app.build, $0) == .orderedSame } ?? true)
             } else { versionMatches = ReleaseComparison.satisfies(app, target: cask.version) }
             if versionMatches {
                 app.state = .current; app.detail = "Installed metadata matches the available Homebrew release."; return app
@@ -134,12 +137,19 @@ public struct HomebrewAdapter {
             guard outdated.contains(cask.token) else {
                 app.detail = "Homebrew does not report an update, but installed app metadata could not be reconciled with its catalog."; return app
             }
-            app.targetVersion = cask.version
+            app.targetVersion = target
+            app.targetPackageVersion = cask.version
+            app.targetVersionIsMarketing = cask.displayVersion != nil
             app.targetBuild = cask.buildVersion
+            app.targetSHA256 = cask.sha256
             app.state = .updateAvailable; app.automatic = cask.simpleApp && !cask.pinned && !cask.disabled
             app.detail = "Managed by Homebrew. The update will be checked again before installation."
             if !app.automatic { app.state = .manual; app.detail = "Pinned, disabled, or complex installer cask. Update through Homebrew manually." }
-            if cask.version.split(separator: ",").contains(where: { ReleaseComparison.compare(String($0), String($0)) == nil }) {
+            if cask.sha256?.range(of: #"\A[0-9a-f]{64}\z"#, options: .regularExpression) == nil {
+                app.state = .manual; app.automatic = false
+                app.detail = "This cask has no valid SHA-256 digest to review. Update through Homebrew manually."
+            }
+            if target.split(separator: ",").contains(where: { ReleaseComparison.compare(String($0), String($0)) == nil }) {
                 app.state = .manual; app.automatic = false; app.detail = "This vendor version needs a source-specific verifier. Update through Homebrew manually."
             }
             if let minimum = cask.macOSMinimum {
@@ -154,7 +164,8 @@ public struct HomebrewAdapter {
     public func preview(_ app: AppRecord) async throws -> String {
         guard let id = app.packageID else { throw UpdaterError("Missing cask identity.") }
         try ToolLocator.validatePackageID(id)
-        return try await command(["upgrade", "--dry-run", "--cask", "--greedy", "--no-quit", "--skip-cask-deps", id])
+        let preview = try await command(["upgrade", "--dry-run", "--cask", "--greedy", "--no-quit", "--skip-cask-deps", id])
+        return "Package SHA-256: " + (app.targetSHA256 ?? "Unavailable") + "\n" + preview
     }
     public func upgrade(_ app: AppRecord) async throws {
         guard let id = app.packageID else { throw UpdaterError("Missing cask identity.") }
@@ -177,7 +188,11 @@ public struct StoreUpdate: Equatable {
 public struct AppStoreAdapter {
     public let executable: String
     public let runner: any CommandRunning
-    public init(executable: String, runner: any CommandRunning) { self.executable = executable; self.runner = runner }
+    private let invokingUser: () -> (userID: uid_t, groupID: gid_t)
+    public init(executable: String, runner: any CommandRunning,
+                invokingUser: @escaping () -> (userID: uid_t, groupID: gid_t) = { (getuid(), getgid()) }) {
+        self.executable = executable; self.runner = runner; self.invokingUser = invokingUser
+    }
     public func command(_ args: [String]) async throws -> String {
         try await runner.run(executable, args, environment: [:], timeout: 90).checked()
     }
@@ -245,8 +260,12 @@ public struct AppStoreAdapter {
         guard let id = app.packageID else { throw UpdaterError("Missing App Store identity.") }
         try ToolLocator.validateStoreID(id)
         guard ["/opt/homebrew/bin/mas", "/usr/local/bin/mas", "/opt/local/bin/mas"].contains(executable) else { throw UpdaterError("Unrecognized mas executable location.") }
-        // Only a fixed executable and validated numeric ID enter the privileged shell.
-        let shellCommand = "'" + executable + "' update --inaccurate --check-min-os " + id
+        // Read the real process identity before authorization. Inherited SUDO_*
+        // environment values are not evidence of the user requesting this update.
+        let user = invokingUser()
+        guard user.userID != 0 else { throw UpdaterError("Run Maccet as your regular user before updating App Store applications.") }
+        // Only fixed paths and validated numeric values enter the privileged shell.
+        let shellCommand = "/usr/bin/env SUDO_UID=\(user.userID) SUDO_GID=\(user.groupID) '" + executable + "' update --inaccurate --check-min-os " + id
         let script = "do shell script \"" + shellCommand + "\" with administrator privileges"
         _ = try await runner.run("/usr/bin/osascript", ["-e", script], environment: [:], timeout: nil).checked()
     }

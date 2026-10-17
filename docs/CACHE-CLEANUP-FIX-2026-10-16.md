@@ -2,6 +2,14 @@
 
 Scope: one Phase F fix, based on `8bb9b45` after PR #1 merged.
 
+## Descriptor-bound follow-up — 17 October 2026
+
+The later adversarial fixture inserts a directory-name swap after identity and marker validation. The previous path-based removal deleted a disposable replacement's `Keep` file. The revised cleanup opens and checks root/attempt directory descriptors, reads a bounded regular ownership marker relative to the attempt, and performs the entire file walk with `openat`/`fstatat`/`unlinkat` relative to held directory descriptors. Each child directory is opened without following symlinks, matched against its observed identity and constrained to the attempt's filesystem device.
+
+Cleanup retains directory entries and the root ownership marker. It does not perform a later pathname `rmdir`: POSIX offers no atomic inode-conditional directory removal, so checking an inode and then removing its name would reopen the same race. Download/log file entries and symlinks inside the original opened namespace are removed; symlink targets, replacement attempts and sibling failed attempts are preserved. The UI explains the retained metadata/empty-folder policy.
+
+This is descriptor-relative containment on the local macOS filesystem exercised by the fixtures, not an immutable snapshot against concurrent writers. Files added during a walk can remain. Renaming an already opened owned directory does not change which directory the cleanup walks. No path-based recursive removal is used after validation. Existing pre-validation replacement guards remain in place. The historical limits below describe the previous implementation.
+
 ## Observation and reproduction
 
 Cleanup checked the canonical path, UUID, absence of a symlink, and ownership

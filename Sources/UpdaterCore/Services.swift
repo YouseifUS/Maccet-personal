@@ -12,7 +12,7 @@ public struct ScanService {
     public func scan(preferences: Preferences, onPartial: ((ScanResult) async -> Void)? = nil) async -> ScanResult {
         let inventory = await Task.detached { AppInventory().discover(roots: preferences.inventoryRoots, includeSystem: preferences.includeSystemApplications ?? true) }.value
         let updateInventory = inventory.apps.filter { $0.state != .systemManaged }
-        let applicableSources = inventory.applicableSources
+        let applicableSources = inventory.applicableSources(macPortsAvailable: sourcePaths[.macPorts] != nil)
         var result = ScanResult(apps: inventory.apps, sources: [], warnings: inventory.warnings)
         var routes: [String: [UpdateRoute]] = [:]
         await onPartial?(result)
@@ -21,14 +21,18 @@ public struct ScanService {
                 result.sources.append(SourceHealth(source: source, executable: sourcePaths[source], available: sourcePaths[source] != nil, message: "Disabled in Settings.", checkRequired: false)); continue
             }
             if !applicableSources.contains(source) {
-                result.sources.append(SourceHealth(source: source, executable: sourcePaths[source], available: sourcePaths[source] != nil, message: "Not needed for this inventory. No update check was performed.", checkRequired: false)); continue
+                let message = source == .macPorts && sourcePaths[source] == nil
+                    ? "Optional MacPorts is not installed. This source was not checked. Include MacPorts in Sources preparation if you use it."
+                    : "Not needed for this inventory. No update check was performed."
+                result.sources.append(SourceHealth(source: source, executable: sourcePaths[source], available: sourcePaths[source] != nil, message: message, checkRequired: false)); continue
             }
             guard let executable = sourcePaths[source] else {
                 result.sources.append(SourceHealth(source: source, message: "\(source.title) not installed. Open Sources and choose Prepare Sources.", checkRequired: true)); continue
             }
             var health = SourceHealth(source: source, executable: executable, available: true, message: "Available", checkRequired: true)
             do {
-                health.version = String(try await runner.run(executable, source.versionArguments, environment: ["HOMEBREW_NO_AUTO_UPDATE": "1"], timeout: 15).checked().split(whereSeparator: \.isNewline).first ?? "")
+                let output = try await runner.run(executable, source.versionArguments, environment: ["HOMEBREW_NO_AUTO_UPDATE": "1"], timeout: 15).checked()
+                health.version = try SourceToolVersion.validated(output, source: source)
                 let records: [AppRecord]
                 if source == .homebrew {
                     records = try await HomebrewAdapter(executable: executable, runner: runner, cacheRoot: cacheRoot).check(apps: updateInventory)
@@ -37,8 +41,6 @@ public struct ScanService {
                     records = try await MacPortsAdapter(executable: executable, runner: runner).check(apps: updateInventory)
                     health.message = "Installed-file ownership checked against the local ports index. Choose Prepare Sources in Sources to refresh a stale index."
                 } else {
-                    let major = Int(health.version.split(separator: ".").first ?? "0") ?? 0
-                    guard major >= 7 else { throw UpdaterError("mas 7 or later is required for identity-based matching. Retry source setup or use App Store.") }
                     records = try await AppStoreAdapter(executable: executable, runner: runner).check(apps: updateInventory)
                     health.message = "Receipt, bundle identity, and installed path matched. Apple's lookup may lag store availability."
                 }

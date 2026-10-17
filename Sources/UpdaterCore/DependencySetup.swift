@@ -66,23 +66,22 @@ public struct DependencySetup {
         _ = try await command("/bin/bash", [Self.scriptURL.path] + arguments, timeout: nil)
     }
     private func probeVersion(_ executable: String, tool: String) async throws -> String {
-        let version = try await command(executable, tool == "brew" ? ["--version"] : ["version"], timeout: 20)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !version.isEmpty else { throw UpdaterError("\(tool) did not report a version.") }
-        if tool == "mas" {
-            guard let major = Int(version.split(separator: ".").first ?? ""), major >= 7 else {
-                throw UpdaterError("mas 7 or later is required. The installed helper reported: " + version)
-            }
+        guard let source = UpdateSource.allCases.first(where: { $0.toolName == tool }) else {
+            throw UpdaterError("Unsupported source tool.")
         }
-        return version
+        let output = try await command(executable, source.versionArguments, timeout: 20)
+        return try SourceToolVersion.validated(output, source: source)
     }
-    public func prepare(inventory: InventoryResult? = nil, disabledSources: Set<UpdateSource> = [], retrying previousItems: [SetupItem]? = nil, progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
-        await run(inventory: inventory, disabledSources: disabledSources, retrying: previousItems, prepareTools: true, progress: progress)
+    private func versionMessage(tool: String, version: String) -> String {
+        (tool == "brew" ? "Homebrew " : tool == "port" ? "MacPorts " : "mas ") + version
+    }
+    public func prepare(inventory: InventoryResult? = nil, disabledSources: Set<UpdateSource> = [], includeMacPorts: Bool = false, retrying previousItems: [SetupItem]? = nil, progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
+        await run(inventory: inventory, disabledSources: disabledSources, retrying: previousItems, prepareTools: true, includeMacPorts: includeMacPorts, progress: progress)
     }
     public func checkReadiness(inventory: InventoryResult? = nil, disabledSources: Set<UpdateSource> = [], progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
-        await run(inventory: inventory, disabledSources: disabledSources, retrying: nil, prepareTools: false, progress: progress)
+        await run(inventory: inventory, disabledSources: disabledSources, retrying: nil, prepareTools: false, includeMacPorts: false, progress: progress)
     }
-    private func run(inventory: InventoryResult?, disabledSources: Set<UpdateSource>, retrying previousItems: [SetupItem]?, prepareTools: Bool, progress: @escaping ([SetupItem]) async -> Void) async -> [SetupItem] {
+    private func run(inventory: InventoryResult?, disabledSources: Set<UpdateSource>, retrying previousItems: [SetupItem]?, prepareTools: Bool, includeMacPorts: Bool, progress: @escaping ([SetupItem]) async -> Void) async -> [SetupItem] {
         // Reuse successful preparation only for an explicit retry in this session.
         var items = Self.initialItems.map { initial in
             guard let ready = previousItems?.first(where: { $0.id == initial.id && $0.phase == .ready }) else { return initial }
@@ -106,15 +105,19 @@ public struct DependencySetup {
             }
             items[index].executablePath = canonicalPath
             items[index].version = Diagnostics.redact(version)
-            await report(index, .ready, items[index].id == "mas" ? "mas " + version : version)
+            await report(index, .ready, versionMessage(tool: items[index].id, version: version))
         }
-        // Missing metadata cannot prove a source unnecessary. Preserve the
-        // conservative enabled-source behavior for incomplete or absent inventory.
-        let applicableSources = inventory?.applicableSources ?? Set(UpdateSource.allCases)
+        // Incomplete inventories keep candidate checks conservative. An absent
+        // optional manager still needs ownership evidence or explicit opt-in.
+        let requirements = inventory ?? InventoryResult(apps: [], warnings: ["Inventory is incomplete"])
+        let previouslyPreparedPorts = previousItems?.contains { $0.id == "port" && $0.phase == .ready && $0.executablePath != nil } == true
+        let applicableSources = requirements.applicableSources(macPortsAvailable: locate("port") != nil, includeMacPorts: includeMacPorts || previouslyPreparedPorts)
         let requestedSources = applicableSources.subtracting(disabledSources)
         func skip(_ index: Int, _ source: UpdateSource) async {
             if disabledSources.contains(source) { await report(index, .disabled, "\(source.title) is disabled in Settings.") }
-            else { await report(index, .notRequired, "No discovered application requires this source.") }
+            else if source == .macPorts && locate("port") == nil {
+                await report(index, .notRequired, "MacPorts is optional and not installed. Include it in Sources preparation if you use it.")
+            } else { await report(index, .notRequired, "No discovered application requires this source.") }
         }
         let needsMas = requestedSources.contains(.appStore)
         let masUsesPorts = needsMas && locate("mas") == "/opt/local/bin/mas"
@@ -131,7 +134,7 @@ public struct DependencySetup {
                     throw UpdaterError("Tool location changed.")
                 }
                 items[index].version = Diagnostics.redact(version)
-                items[index].message = Diagnostics.redact(items[index].id == "mas" ? "mas " + version : version)
+                items[index].message = Diagnostics.redact(versionMessage(tool: items[index].id, version: version))
             } catch {
                 items[index] = Self.initialItems[index]
             }

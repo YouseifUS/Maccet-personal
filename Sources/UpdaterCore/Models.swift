@@ -192,7 +192,20 @@ public struct PlannedUpdate: Identifiable {
     public var id: String { app.id }
     public var app: AppRecord
     public var preview: String
-    public init(app: AppRecord, preview: String) { self.app = app; self.preview = preview }
+    let reviewedSignature: CodeSignatureEvidence
+    let reviewedToolPath: String?
+    public init(app: AppRecord, preview: String) {
+        self.app = app; self.preview = preview
+        reviewedSignature = CodeSignatureEvidence.capture(at: app.path)
+        reviewedToolPath = app.routeExecutable.map(ToolLocator.canonicalPath)
+    }
+    func validateReviewedTool() throws {
+        guard let executable = app.routeExecutable, let reviewedToolPath,
+              ToolLocator.canonicalPath(executable) == reviewedToolPath,
+              FileManager.default.isExecutableFile(atPath: executable) else {
+            throw UpdaterError("The update tool's reviewed destination changed or is unavailable. Rescan and review a new plan.")
+        }
+    }
 }
 
 public struct UpdaterError: LocalizedError, Equatable {

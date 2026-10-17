@@ -84,13 +84,19 @@ Right-click an app for details, Reveal in Finder, Ignore App, or Skip This Relea
 
 ## Update and cleanup behavior
 
+Only one Maccet operation can own a canonical application path for the current user at a time, across engines, separate app instances and separate download caches. Another attempt is deferred before source commands or cache creation; unrelated apps remain independent. Ownership spans preflight, installation, verification and cleanup. macOS releases the lock if its owner exits, but Maccet never retries the installation automatically: rescan and review after interruption. Other package-manager clients do not participate in this Maccet ownership protocol.
+
+Review also records the canonical destination of the selected update tool. Changing a tool symlink after review requires a new scan and plan; the destination is checked again at installation boundaries. This detects destination changes, not in-place binary replacement, library changes or an external retarget in the interval after a check.
+
 Homebrew updates are scoped to a named cask with `--no-quit` and `--skip-cask-deps`. Homebrew's automatic cleanup is disabled for these invocations. A dry run is shown before execution. Homebrew can still perform its own necessary installation actions, such as binary linking; related changes reported by its preview are visible in the review sheet.
 
 The first alpha supports automatic updates for simple, specifically versioned app casks whose target metadata can be verified. A complete SHA-256 package digest is required and must remain unchanged through review and both preflight checks. Missing, malformed, and `no_check` digests require manual attention, as do pinned, disabled, complex installer, non-numeric vendor-version, and ambiguous cases. Apps installed outside Homebrew are not silently adopted, even if they appear in its catalog.
 
+Update review captures code-signature evidence. Signed applications must pass strict resource, nested-code and architecture validation before installation and after the target metadata matches. Certificate-signed replacements must satisfy the reviewed designated requirement, signing identifier and team identity. Ad-hoc signatures establish integrity and a signing identifier, without certifying a publisher. Applications already unsigned at review remain supported without a publisher-authenticity claim; a newly signed replacement must validate. Invalid signatures or changed reviewed signing identities prevent success and retain the attempt's artifacts. These are point-in-time checks, not a guarantee against concurrent external changes or a substitute for Gatekeeper/notarization.
+
 App Store operations use a fixed `mas` executable and validated numeric store ID. The app does not collect or store your Apple Account or administrator password. If a store operation fails, open App Store from the app row and resolve the issue there.
 
-For Homebrew, each update attempt gets a separate cache folder under this app's local data directory. After the reviewed target is verified, only that attempt's cache is eligible for automatic removal. Failed or unverified attempts retain their artifacts. Disabling cleanup retains successful-attempt files too.
+For Homebrew, each update attempt gets a separate cache folder under this app's local data directory. After the reviewed target is verified, only that attempt's download and temporary-log files are eligible for automatic removal. Cleanup retains the directory structure and ownership marker, so a late directory-name swap cannot redirect recursive deletion. Failed or unverified attempts retain their artifacts. Disabling cleanup retains successful-attempt files too.
 
 Shared Homebrew caches, general app caches, user preferences, licenses, and documents are preserved. App Store manages its own downloads. The app does not invoke `brew cleanup`, `uninstall`, `zap`, or a global cache deletion command. This deliberately limits cleanup coverage in this alpha.
 

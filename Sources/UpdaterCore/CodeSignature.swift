@@ -1,0 +1,73 @@
+import Foundation
+import Security
+
+/// Transient evidence captured at review. Each validation opens a fresh code
+/// object so a previous successful validation cannot hide a changed bundle.
+enum CodeSignatureEvidence {
+    case unsigned
+    case adHoc(identifier: String)
+    case signed(requirement: SecRequirement, identifier: String, team: String?)
+    case invalid
+
+    private static let flags = SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures | kSecCSCheckNestedCode)
+
+    private static func code(at path: String) -> SecStaticCode? {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &code) == errSecSuccess else { return nil }
+        return code
+    }
+    private static func information(_ code: SecStaticCode) -> [String: Any]? {
+        var information: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess else { return nil }
+        return information as? [String: Any]
+    }
+    static func capture(at path: String) -> CodeSignatureEvidence {
+        guard let code = code(at: path) else { return .invalid }
+        let status = SecStaticCodeCheckValidity(code, flags, nil)
+        if status == errSecCSUnsigned { return hasSignatureResources(at: path) ? .invalid : .unsigned }
+        guard status == errSecSuccess, let info = information(code),
+              let identifier = info[kSecCodeInfoIdentifier as String] as? String else { return .invalid }
+        let signingFlags = (info[kSecCodeInfoFlags as String] as? NSNumber)?.uint32Value ?? 0
+        if signingFlags & SecCodeSignatureFlags.adhoc.rawValue != 0 { return .adHoc(identifier: identifier) }
+        var requirement: SecRequirement?
+        guard SecCodeCopyDesignatedRequirement(code, [], &requirement) == errSecSuccess,
+              let requirement else { return .invalid }
+        return .signed(requirement: requirement, identifier: identifier, team: info[kSecCodeInfoTeamIdentifier as String] as? String)
+    }
+    func validate(at path: String) throws {
+        guard let code = Self.code(at: path) else { throw Self.failure }
+        switch self {
+        case .invalid:
+            throw Self.failure
+        case .unsigned:
+            // Unsigned applications carry no publisher guarantee. A newly signed
+            // replacement must nevertheless have a valid signature.
+            let status = SecStaticCodeCheckValidity(code, Self.flags, nil)
+            guard status == errSecSuccess || (status == errSecCSUnsigned && !Self.hasSignatureResources(at: path)) else { throw Self.failure }
+        case .adHoc(let identifier):
+            // Ad-hoc signatures establish integrity, not a certified publisher.
+            // Their cdhash changes on every release; preserve the signing ID.
+            guard SecStaticCodeCheckValidity(code, Self.flags, nil) == errSecSuccess,
+                  Self.information(code)?[kSecCodeInfoIdentifier as String] as? String == identifier else { throw Self.failure }
+        case .signed(let requirement, let identifier, let team):
+            guard SecStaticCodeCheckValidity(code, Self.flags, requirement) == errSecSuccess,
+                  let info = Self.information(code),
+                  info[kSecCodeInfoIdentifier as String] as? String == identifier,
+                  info[kSecCodeInfoTeamIdentifier as String] as? String == team else { throw Self.failure }
+        }
+    }
+    private static func hasSignatureResources(at path: String) -> Bool {
+        FileManager.default.fileExists(atPath: URL(fileURLWithPath: path).appendingPathComponent("Contents/_CodeSignature").path)
+    }
+    var reviewSummary: String {
+        switch self {
+        case .unsigned: return "Unsigned application: publisher identity cannot be verified."
+        case .adHoc: return "Signature integrity verified; publisher identity is not certified."
+        case .signed: return "Signature verified. The update must preserve the reviewed signing identity."
+        case .invalid: return "The code signature could not be verified."
+        }
+    }
+    private static var failure: UpdaterError {
+        UpdaterError("The application's code signature is invalid or its reviewed signing identity changed. Rescan and review the application before retrying. No cleanup was performed.")
+    }
+}

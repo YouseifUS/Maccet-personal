@@ -1,6 +1,6 @@
 import Foundation
 import Darwin
-import UpdaterCore
+@_spi(Testing) import UpdaterCore
 
 private struct CheckFailure: Error, CustomStringConvertible { var description: String }
 private func expect(_ condition: @autoclosure () throws -> Bool, _ message: String = "Expectation failed", file: StaticString = #filePath, line: UInt = #line) throws {
@@ -394,7 +394,8 @@ private enum Checks {
             let plans = try await engine.prepare([try fixture.candidate()], preferences: Preferences())
             let result = await engine.execute(plans[0], cleanup: true) { _, _ in }
             try expect(result.state == .succeeded, result.message)
-            try expect(try FileManager.default.contentsOfDirectory(atPath: cache.appendingPathComponent("Operations").path).isEmpty)
+            let retained = try FileManager.default.contentsOfDirectory(at: cache.appendingPathComponent("Operations"), includingPropertiesForKeys: nil)
+            try expect(retained.count == 1 && FileManager.default.fileExists(atPath: retained[0].appendingPathComponent(".owner.json").path))
         }
         await check("A signed bundle changed after review is rejected before source commands") {
             let fixture = try Fixture(); defer { fixture.clean() }
@@ -472,6 +473,36 @@ private enum Checks {
             let retried = await engine.execute(plan, cleanup: true) { _, _ in }
             try expect(retried.state == .succeeded, retried.message)
         }
+        await check("Reviewed tool symlink destinations remain bound through both preflights and installation") {
+            for changeAt in ["after-review", "isolated-preflight", "install-boundary", "stable"] {
+                let fixture = try Fixture(); defer { fixture.clean() }
+                let tool = fixture.root.appendingPathComponent("brew")
+                try FileManager.default.createSymbolicLink(atPath: tool.path, withDestinationPath: "/usr/bin/true")
+                func retarget() throws {
+                    try FileManager.default.removeItem(at: tool)
+                    try FileManager.default.createSymbolicLink(atPath: tool.path, withDestinationPath: "/usr/bin/false")
+                }
+                var app = try fixture.candidate(); app.routeExecutable = tool.path
+                let runner = try fixture.runner { try fixture.write(version: "2.0", build: "20") }
+                let engine = UpdateEngine(runner: runner, cacheRoot: fixture.root.appendingPathComponent("Cache"), sourcePaths: [.homebrew: tool.path])
+                let plan = try await engine.prepare([app], preferences: Preferences())[0]
+                runner.calls = []
+                if changeAt == "after-review" { try retarget() }
+                let original = runner.handler
+                runner.handler = { call in
+                    let result = try original(call)
+                    if changeAt == "isolated-preflight", call.args.first == "info", call.environment["HOMEBREW_CACHE"]?.contains("Operations") == true { try retarget() }
+                    return result
+                }
+                let result = await engine.execute(plan, cleanup: true) { state, _ in
+                    if changeAt == "install-boundary", state == .installing { try retarget() }
+                }
+                let installs = runner.calls.filter { $0.args.first == "upgrade" }
+                if changeAt == "stable" { try expect(result.state == .succeeded && installs.count == 1, result.message) }
+                else { try expect(result.state == .failed && installs.isEmpty, "Changed destination reached installation at " + changeAt) }
+                if changeAt == "after-review" { try expect(runner.calls.isEmpty) }
+            }
+        }
         await check("Reviewed updates execute only the named cask and clean only after verification") {
             let fixture = try Fixture(); defer { fixture.clean() }
             let app = try fixture.candidate()
@@ -485,7 +516,8 @@ private enum Checks {
             try expect(installs.count == 1 && installs[0].args.last == "example")
             try expect(installs[0].args.contains("--no-quit") && installs[0].args.contains("--skip-cask-deps"))
             let operations = fixture.root.appendingPathComponent("Cache/Operations")
-            try expect(try FileManager.default.contentsOfDirectory(atPath: operations.path).isEmpty)
+            let metadata = try FileManager.default.contentsOfDirectory(at: operations, includingPropertiesForKeys: nil)
+            try expect(metadata.count == 1 && FileManager.default.fileExists(atPath: metadata[0].appendingPathComponent(".owner.json").path))
             try expect(!runner.calls.contains { $0.args.first == "cleanup" })
         }
         await check("Command success without an installed change retains artifacts and fails verification") {
@@ -603,9 +635,16 @@ private enum Checks {
             let root = fixture.root.appendingPathComponent("Operations")
             let success = try OwnedUpdateCache(root: root); let failed = try OwnedUpdateCache(root: root)
             let external = fixture.root.appendingPathComponent("Keep.txt"); try Data("keep".utf8).write(to: external)
+            try Data("failed download".utf8).write(to: failed.folder.appendingPathComponent("Failed"))
+            let nested = success.folder.appendingPathComponent("Homebrew/Nested")
+            try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+            try Data("owned download".utf8).write(to: nested.appendingPathComponent("Download"))
             try FileManager.default.createSymbolicLink(at: success.folder.appendingPathComponent("external"), withDestinationURL: external)
             try success.removeAfterVerification(verified: true)
-            try expect(FileManager.default.fileExists(atPath: external.path) && FileManager.default.fileExists(atPath: failed.folder.path))
+            try expect(FileManager.default.fileExists(atPath: external.path) && FileManager.default.fileExists(atPath: failed.folder.appendingPathComponent("Failed").path))
+            try expect(!FileManager.default.fileExists(atPath: nested.appendingPathComponent("Download").path))
+            try expect(!FileManager.default.fileExists(atPath: success.folder.appendingPathComponent("external").path))
+            try expect(FileManager.default.fileExists(atPath: success.folder.appendingPathComponent(".owner.json").path))
         }
         await check("Recovery marks active operations interrupted without retry or cleanup") {
             let fixture = try Fixture(); defer { fixture.clean() }
@@ -628,6 +667,34 @@ private enum Checks {
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             try expect(json?["apps"] != nil)
             try expect(!String(decoding: data, as: UTF8.self).contains("secret"))
+        }
+        await check("Post-validation swaps cannot redirect cleanup into replacements or failed attempts") {
+            for swap in ["replacement", "failed", "parent"] {
+                let fixture = try Fixture(); defer { fixture.clean() }
+                let fm = FileManager.default
+                let root = fixture.root.appendingPathComponent("Operations")
+                let cache = try OwnedUpdateCache(root: root)
+                let failed = try OwnedUpdateCache(root: root)
+                try Data("owned download".utf8).write(to: cache.folder.appendingPathComponent("Download"))
+                try Data("failed download".utf8).write(to: failed.folder.appendingPathComponent("Failed"))
+                let retained = fixture.root.appendingPathComponent("Retained")
+                try cache.removeAfterVerification(verified: true, afterValidation: {
+                    if swap == "parent" {
+                        try fm.moveItem(at: root, to: retained)
+                        try fm.copyItem(at: retained, to: root)
+                    } else {
+                        try fm.moveItem(at: cache.folder, to: retained)
+                        if swap == "failed" { try fm.moveItem(at: failed.folder, to: cache.folder) }
+                        else { try fm.copyItem(at: retained, to: cache.folder) }
+                    }
+                    try Data("unrelated data".utf8).write(to: cache.folder.appendingPathComponent("Keep"))
+                })
+                try expect(try Data(contentsOf: cache.folder.appendingPathComponent("Keep")) == Data("unrelated data".utf8), "Deleted replacement after validation: " + swap)
+                let original = swap == "parent" ? retained.appendingPathComponent(cache.folder.lastPathComponent) : retained
+                try expect(!fm.fileExists(atPath: original.appendingPathComponent("Download").path))
+                let preservedFailed = swap == "failed" ? cache.folder : (swap == "parent" ? retained.appendingPathComponent(failed.folder.lastPathComponent) : failed.folder)
+                try expect(try Data(contentsOf: preservedFailed.appendingPathComponent("Failed")) == Data("failed download".utf8))
+            }
         }
         await check("Cleanup rejects an operation folder replaced by an external symlink") {
             let fixture = try Fixture(); defer { fixture.clean() }

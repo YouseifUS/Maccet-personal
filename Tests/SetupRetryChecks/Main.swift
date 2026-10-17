@@ -12,6 +12,8 @@ private final class SetupRunner: CommandRunning {
     var actions: [String] = []
     var calls = 0
     var macPortsInstallerRequests = 0
+    var metadataBrewRequests = 0
+    var failMetadataPorts = false
     var beforeSetup: (@MainActor () throws -> Void)?
     func run(_ executable: String, _ arguments: [String], environment: [String: String], timeout: TimeInterval?) async throws -> CommandResult {
         calls += 1
@@ -23,8 +25,9 @@ private final class SetupRunner: CommandRunning {
         if executable == "/usr/bin/xcrun" { try await beforeSetup?(); return CommandResult(status: toolsMissing ? 1 : 0, output: "/usr/bin/clang") }
         if executable == "/bin/bash", arguments.count > 1 {
             let action = arguments[1]; actions.append(action)
-            return CommandResult(status: action == "ports-update" && failPorts ? 1 : 0, errorOutput: "Controlled source failure")
+            return CommandResult(status: (action == "ports-update" && failPorts) || (action == "ports-sync" && failMetadataPorts) ? 1 : 0, errorOutput: "Controlled source failure")
         }
+        if arguments.first == "outdated", environment["HOMEBREW_FORCE_API_AUTO_UPDATE"] == "1" { metadataBrewRequests += 1 }
         if arguments == ["--version"] { return CommandResult(output: "Homebrew 7.0.9") }
         if arguments == ["version"] { return CommandResult(output: executable == "/opt/homebrew/bin/mas" ? masVersion : "Version: 2.12.7") }
         if arguments == ["list", "--formula", "--versions", "mas"] { return CommandResult(output: "mas 7.0.0") }
@@ -189,7 +192,22 @@ private final class SetupRunner: CommandRunning {
             try expect(!changedHelper.setupNeedsAttention && changedHelper.setupItems[3].version == "7.1.0", "GUI retained stale readiness after helper recovery")
             try expect(Array(runner.actions.dropFirst(beforeRecovery)) == ["mas-update"] && changedHelper.lastScan != nil, "Helper recovery repeated successful manager maintenance")
             print("PASS GUI helper recovery clears attention without repeating healthy managers")
-            print("\n16 setup orchestration checks passed; 0 failed.")
+            let metadataRunner = SetupRunner(); metadataRunner.failMetadataPorts = true
+            let metadata = AppModel(runner: metadataRunner, sourcePaths: [.homebrew: paths["brew"]!, .appStore: paths["mas"]!], setupLocate: { paths[$0] })
+            metadata.preferences.scanRoots = [applications.path]; metadata.preferences.includeSystemApplications = false
+            metadata.refreshSourceMetadata()
+            try expect(metadata.refreshingMetadata && metadata.busy && metadata.preventsQuit && !metadata.maintainingSources, "Metadata intent was not independently active")
+            try await wait(metadata)
+            try expect(!metadata.preventsQuit && !metadata.setupWasPrepared && metadata.setupActionTitle == "Prepare Sources", "Metadata refresh was counted as tool preparation")
+            try expect(metadata.metadataRefreshItems[0].phase == .ready && metadata.metadataRefreshItems[1].phase == .failed && metadata.metadataNeedsAttention, "Partial metadata failure was lost")
+            try expect(metadata.lastMetadataRefreshAttempt != nil && metadata.lastScan != nil && metadataRunner.metadataBrewRequests == 1, "Metadata results or following app scan were missing")
+            try expect(metadataRunner.actions == ["ports-sync"], "Metadata-only intent broadened into tool maintenance")
+            metadataRunner.failMetadataPorts = false
+            metadata.refreshSourceMetadata(); try await wait(metadata)
+            try expect(!metadata.metadataNeedsAttention && metadata.metadataRefreshItems[1].phase == .ready && metadataRunner.metadataBrewRequests == 2, "Metadata retry retained stale failures")
+            try expect(metadataRunner.actions == ["ports-sync", "ports-sync"] && metadata.setupItems.allSatisfy { $0.phase == .waiting }, "Metadata refresh overwrote independent preparation evidence")
+            print("PASS Metadata scope, partial failure and retry remain independent from tool preparation")
+            print("\n17 setup orchestration checks passed; 0 failed.")
         } catch {
             FileHandle.standardError.write(Data("FAIL \(error)\n".utf8)); exit(1)
         }

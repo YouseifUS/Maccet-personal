@@ -33,6 +33,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var setupWasPrepared = false
     @Published var setupItems = DependencySetup.initialItems
     @Published var includeMacPortsInPreparation = false
+    @Published var refreshingMetadata = false
+    @Published var metadataRefreshItems: [SetupItem] = []
+    @Published var lastMetadataRefreshAttempt: Date?
     private var startupStarted = false
     @Published var scanning = false
     @Published var preparing = false
@@ -53,10 +56,16 @@ final class AppModel: ObservableObject {
     let runner: any CommandRunning
     private let setupLocate: (String) -> String?
     private let sourcePaths: [UpdateSource: String]?
-    var busy: Bool { settingUp || scanning || preparing || updating }
+    var busy: Bool { settingUp || refreshingMetadata || scanning || preparing || updating }
+    var preventsQuit: Bool { updating || maintainingSources || refreshingMetadata }
     var setupNeedsAttention: Bool { setupItems.contains { $0.phase.needsAttention } }
     var setupActionTitle: String { setupWasPrepared ? (setupNeedsAttention ? "Retry Setup" : "Prepare Sources Again") : "Prepare Sources" }
-    var sourceChecksNeedAttention: Bool { sources.contains { !preferences.disabledSources.contains($0.source) && $0.needsAttention } }
+    var metadataNeedsAttention: Bool {
+        metadataRefreshItems.contains { item in
+            item.phase.needsAttention && UpdateSource.allCases.contains { $0.toolName == item.id && !preferences.disabledSources.contains($0) }
+        }
+    }
+    var sourceChecksNeedAttention: Bool { metadataNeedsAttention || sources.contains { !preferences.disabledSources.contains($0.source) && $0.needsAttention } }
     var eligible: [AppRecord] { apps.filter(preferences.isEligible) }
     var checkedCount: Int { apps.filter { $0.state.isChecked }.count }
     var checkableCount: Int { apps.filter { $0.state != .systemManaged }.count }
@@ -108,6 +117,29 @@ final class AppModel: ObservableObject {
 
     func prepareSources() {
         runSourceSetup(prepareTools: true)
+    }
+
+    func refreshSourceMetadata() {
+        guard !busy else { return }
+        refreshingMetadata = true; metadataRefreshItems = SourceMetadataRefresh.initialItems
+        selected = []; review = []; showingReview = false
+        let prefs = preferences
+        status = "Reading applications before refreshing source metadata…"
+        Task { [self] in
+            let inventory = await Task.detached {
+                AppInventory().discover(roots: prefs.inventoryRoots, includeSystem: prefs.includeSystemApplications ?? true)
+            }.value
+            metadataRefreshItems = await SourceMetadataRefresh(runner: runner, cacheRoot: cacheRoot, locate: setupLocate)
+                .refresh(inventory: inventory, disabledSources: prefs.disabledSources) { [weak self] items in
+                    await MainActor.run {
+                        self?.metadataRefreshItems = items
+                        if let active = items.first(where: { $0.phase == .running }) { self?.status = active.message }
+                    }
+                }
+            lastMetadataRefreshAttempt = Date()
+            refreshingMetadata = false
+            scan()
+        }
     }
 
     private func runSourceSetup(prepareTools: Bool) {

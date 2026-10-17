@@ -23,6 +23,10 @@ case "${1:-}" in
             mas-update) exec "$2" upgrade --formula mas ;;
         esac
         ;;
+    ports-sync)
+        [[ $# == 1 ]] || fail "Unexpected metadata refresh arguments."
+        authorize '/opt/local/bin/port -N sync'
+        ;;
     ports-update)
         [[ $# == 1 ]] || fail "Unexpected startup arguments."
         authorize '/opt/local/bin/port -N selfupdate'

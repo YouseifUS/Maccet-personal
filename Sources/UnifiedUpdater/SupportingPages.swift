@@ -4,9 +4,12 @@ import UpdaterCore
 
 struct SetupSteps: View {
     @EnvironmentObject var model: AppModel
+    var results: [SetupItem]? = nil
+    var readyTitle = "Ready"
+    private var items: [SetupItem] { results ?? model.setupItems }
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(model.setupItems.enumerated()), id: \.element.id) { index, item in
+            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                 HStack(alignment: .top, spacing: 14) {
                     Group {
                         if item.phase == .running { ProgressView().controlSize(.small) }
@@ -25,12 +28,12 @@ struct SetupSteps: View {
                         }
                     }
                 }.padding(.vertical, 16).accessibilityElement(children: .combine)
-                if index < model.setupItems.count - 1 { Divider().overlay(Maccet.border).padding(.leading, 34) }
+                if index < items.count - 1 { Divider().overlay(Maccet.border).padding(.leading, 34) }
             }
         }
     }
     private func phaseLabel(_ phase: SetupPhase) -> String {
-        phase.title
+        phase == .ready ? readyTitle : phase.title
     }
 }
 struct SetupPage: View {
@@ -52,6 +55,7 @@ struct SetupPage: View {
 struct SourcesPage: View {
     @EnvironmentObject var model: AppModel
     @ViewState private var showSteps = true
+    @ViewState private var showMetadata = true
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -59,8 +63,31 @@ struct SourcesPage: View {
                     VStack(alignment: .leading, spacing: 16) {
                         HStack {
                             VStack(alignment: .leading, spacing: 5) {
-                                Text("Source readiness and preparation").font(.system(size: 15, weight: .semibold))
-                                Text("Launch checks readiness. Prepare Sources installs missing tools and refreshes required sources.").font(.system(size: 12)).foregroundStyle(Maccet.secondary)
+                                Text("Source metadata").font(.system(size: 15, weight: .semibold))
+                                Text("Refresh catalog and index data with installed tools, then check applications.").font(.system(size: 12)).foregroundStyle(Maccet.secondary)
+                            }
+                            Spacer()
+                            Button("Refresh Metadata", action: model.refreshSourceMetadata).disabled(model.busy)
+                        }
+                        if model.metadataNeedsAttention {
+                            Label("Some metadata requests need attention", systemImage: "exclamationmark.triangle").font(.system(size: 12)).foregroundStyle(StatusTone.failure.foreground)
+                        }
+                        if let attempt = model.lastMetadataRefreshAttempt {
+                            Text("Last attempt: \(attempt.formatted(date: .abbreviated, time: .shortened))").font(.system(size: 12)).foregroundStyle(Maccet.secondary)
+                        }
+                        if !model.metadataRefreshItems.isEmpty {
+                            DisclosureGroup("Metadata request results", isExpanded: $showMetadata) {
+                                SetupSteps(results: model.metadataRefreshItems, readyTitle: "Request completed")
+                            }
+                        }
+                    }
+                }
+                Surface {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Source tools and preparation").font(.system(size: 15, weight: .semibold))
+                                Text("Launch checks readiness. Prepare Sources can install tools, update Homebrew/MacPorts and mas, and refresh their catalogs.").font(.system(size: 12)).foregroundStyle(Maccet.secondary)
                             }
                             Spacer()
                             Button(model.setupActionTitle, action: model.prepareSources).disabled(model.busy)

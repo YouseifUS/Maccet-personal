@@ -126,7 +126,7 @@ private final class ControlledRunner: CommandRunning {
             try expect(s.model.history.filter { $0.state == .succeeded }.count == 2 && s.model.history.filter { $0.state == .failed }.count == 1, "Mixed outcomes were lost")
             let operations = s.model.cacheRoot.appendingPathComponent("Operations")
             let retained = try FileManager.default.contentsOfDirectory(atPath: operations.path)
-            try expect(retained.count == 1, "Verified cleanup removed failed artifacts or retained successful artifacts")
+            try expect(retained.count == 3, "Cleanup removed attempt containers despite the descriptor-bound retention policy")
             let persisted = try s.model.store.load([ActivityRecord].self, file: "history.json")
             try expect(persisted.count == 3 && !persisted.contains { $0.state.isActive }, "Final queue history was not saved")
         }

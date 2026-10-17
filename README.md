@@ -96,7 +96,7 @@ Update review captures code-signature evidence. Signed applications must pass st
 
 App Store operations use a fixed `mas` executable and validated numeric store ID. The app does not collect or store your Apple Account or administrator password. If a store operation fails, open App Store from the app row and resolve the issue there.
 
-For Homebrew, each update attempt gets a separate cache folder under this app's local data directory. After the reviewed target is verified, only that attempt's cache is eligible for automatic removal. Failed or unverified attempts retain their artifacts. Disabling cleanup retains successful-attempt files too.
+For Homebrew, each update attempt gets a separate cache folder under this app's local data directory. After the reviewed target is verified, only that attempt's download and temporary-log files are eligible for automatic removal. Cleanup retains the directory structure and ownership marker, so a late directory-name swap cannot redirect recursive deletion. Failed or unverified attempts retain their artifacts. Disabling cleanup retains successful-attempt files too.
 
 Shared Homebrew caches, general app caches, user preferences, licenses, and documents are preserved. App Store manages its own downloads. The app does not invoke `brew cleanup`, `uninstall`, `zap`, or a global cache deletion command. This deliberately limits cleanup coverage in this alpha.
 

@@ -183,7 +183,7 @@ public struct UpdateEngine {
             if cleanup, let ownedCache {
                 do {
                     try ownedCache.removeAfterVerification(verified: true)
-                    record.cleanupMessage = "Removed this verified update's isolated downloads and temporary logs. Shared Homebrew and application caches were preserved."
+                    record.cleanupMessage = "Removed this verified update's isolated downloads and temporary logs. Shared Homebrew and application caches were preserved. Empty folders and the ownership record were kept."
                 } catch { record.cleanupMessage = "Update verified; cleanup failed: " + Diagnostics.redact(error.localizedDescription) }
             } else if app.source == .appStore {
                 record.cleanupMessage = "App Store manages its downloads. No store cache was deleted by this app."

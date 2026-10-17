@@ -464,6 +464,48 @@ private enum Checks {
             try expect(json?["apps"] != nil)
             try expect(!String(decoding: data, as: UTF8.self).contains("secret"))
         }
+        await check("Report publication is private under every process mask and replaces old permissions") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let data = try ReportExport.data(apps: [try fixture.app()], sources: [], history: [], lastScan: nil)
+            let original = umask(0o000); defer { umask(original) }
+            for mask: mode_t in [0o000, 0o022, 0o077, 0o777] {
+                for replacing in [false, true] {
+                    let destination = fixture.root.appendingPathComponent("report-" + String(mask, radix: 8) + "-" + String(replacing) + ".json")
+                    umask(0o000)
+                    if replacing {
+                        try Data("old report".utf8).write(to: destination)
+                        try FileManager.default.setAttributes([.posixPermissions: 0o666], ofItemAtPath: destination.path)
+                    }
+                    umask(mask)
+                    try ReportExport.write(data, to: destination)
+                    let mode = try FileManager.default.attributesOfItem(atPath: destination.path)[.posixPermissions] as! NSNumber
+                    try expect(mode.intValue & 0o777 == 0o600, "Report inherited broad/old permissions under mask " + String(mask, radix: 8))
+                    try expect(try Data(contentsOf: destination) == data)
+                    try expect(try JSONSerialization.jsonObject(with: Data(contentsOf: destination)) is [String: Any])
+                }
+            }
+        }
+        await check("Atomic report publication replaces a selected symlink without modifying its target") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let target = fixture.root.appendingPathComponent("keep.txt")
+            try Data("keep".utf8).write(to: target)
+            let destination = fixture.root.appendingPathComponent("report.json")
+            try FileManager.default.createSymbolicLink(at: destination, withDestinationURL: target)
+            try ReportExport.write(Data("report".utf8), to: destination)
+            try expect(try Data(contentsOf: target) == Data("keep".utf8))
+            try expect(try Data(contentsOf: destination) == Data("report".utf8))
+            try expect(try destination.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true)
+        }
+        await check("A failed report publication retains the destination and removes its temporary file") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let destination = fixture.root.appendingPathComponent("ReportDirectory")
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+            let keep = destination.appendingPathComponent("Keep.txt")
+            try Data("keep".utf8).write(to: keep)
+            try expectThrows { try ReportExport.write(Data("report".utf8), to: destination) }
+            try expect(try Data(contentsOf: keep) == Data("keep".utf8))
+            try expect(try FileManager.default.contentsOfDirectory(atPath: fixture.root.path).allSatisfy { !$0.hasPrefix(".maccet-report-") })
+        }
         await check("Cleanup rejects an operation folder replaced by an external symlink") {
             let fixture = try Fixture(); defer { fixture.clean() }
             let cache = try OwnedUpdateCache(root: fixture.root.appendingPathComponent("Operations"))

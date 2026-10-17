@@ -283,7 +283,7 @@ final class AppModel: ObservableObject {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             let data = try ReportExport.data(apps: apps, sources: sources, history: history, lastScan: lastScan)
-            try data.write(to: url, options: .atomic)
+            try ReportExport.write(data, to: url)
         } catch { self.errorTitle = "Couldn’t export the report"; self.error = error.localizedDescription }
     }
 }

@@ -35,8 +35,15 @@ public struct DependencySetup {
          SetupItem(id: "port", title: "MacPorts"),
          SetupItem(id: "mas", title: "App Store helper (mas)")]
     }
+    public static var packagedScriptURL: URL? {
+        // Classic SwiftPM's generated accessor searches beside the .app and
+        // then the original build folder. Prefer the delivered app resources.
+        guard let resources = Bundle.main.resourceURL,
+              let bundle = Bundle(url: resources.appendingPathComponent("UnifiedUpdater_UpdaterCore.bundle")) else { return nil }
+        return bundle.url(forResource: "prepare-sources", withExtension: "sh")
+    }
     public static var scriptURL: URL {
-        Bundle.module.url(forResource: "prepare-sources", withExtension: "sh")!
+        packagedScriptURL ?? Bundle.module.url(forResource: "prepare-sources", withExtension: "sh")!
     }
     private let runner: any CommandRunning
     private let locate: (String) -> String?

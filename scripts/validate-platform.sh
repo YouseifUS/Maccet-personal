@@ -43,11 +43,20 @@ trap 'rm -rf "$EXTRACTION_DIR"' EXIT
     test "$(/usr/bin/lipo -archs "$EXECUTABLE")" = "$EXPECTED_ARCHITECTURE"
     /usr/bin/plutil -lint "$APP/Contents/Info.plist"
     # Inspect the delivered resource itself, independently of SwiftPM lookup fallbacks.
-    SCRIPT="$APP/Contents/Resources/UnifiedUpdater_UpdaterCore.bundle/Contents/Resources/prepare-sources.sh"
+    RESOURCE_BUNDLE="$APP/Contents/Resources/UnifiedUpdater_UpdaterCore.bundle"
+    SCRIPT="$RESOURCE_BUNDLE/Contents/Resources/prepare-sources.sh"
+    if [ ! -f "$SCRIPT" ]; then SCRIPT="$RESOURCE_BUNDLE/prepare-sources.sh"; fi
     test -f "$SCRIPT"
     /bin/bash -n "$SCRIPT"
     cmp Sources/UpdaterCore/Resources/prepare-sources.sh "$SCRIPT"
     (cd "$EXTRACTION_DIR" && "$EXECUTABLE" --check-startup-script)
+    # A checkout resource must never mask a missing delivered bundle.
+    mv "$RESOURCE_BUNDLE" "$EXTRACTION_DIR/WithheldResources.bundle"
+    if (cd "$EXTRACTION_DIR" && "$EXECUTABLE" --check-startup-script); then
+        printf 'FAIL: missing packaged resources were silently accepted.\n' >&2
+        exit 1
+    fi
+    mv "$EXTRACTION_DIR/WithheldResources.bundle" "$RESOURCE_BUNDLE"
     /usr/bin/shasum -a 256 "$ARCHIVE"
     printf 'PASS: extracted package signature, architecture, metadata and startup resource.\n'
 } 2>&1 | tee "$LOG_DIR/package.log"

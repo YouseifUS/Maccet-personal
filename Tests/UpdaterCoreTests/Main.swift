@@ -454,11 +454,25 @@ private enum Checks {
             let value = Diagnostics.redact(NSHomeDirectory() + "/file https://user:secret@example.com/feed?token=secret&x=1 Bearer abc.def")
             try expect(!value.contains("secret") && !value.contains(NSHomeDirectory()) && !value.contains("abc.def"))
         }
+        await check("Diagnostics remove OAuth, API keys, signed URLs, user info, and complete bearer tokens") {
+            let credentials = ["access_token", "refresh_token", "api_key", "X-Amz-Signature", "X-Amz-Credential", "X-Amz-Security-Token", "X-Goog-Signature", "X-Goog-Credential", "sig", "TOKEN"]
+            for key in credentials {
+                let original = "https://example.com/download?" + key + "=SYNTHETIC_CREDENTIAL%2B%3D&release=2#notes"
+                let redacted = Diagnostics.redact(original)
+                try expect(!redacted.contains("SYNTHETIC_CREDENTIAL"), "Leaked " + key)
+                try expect(redacted.contains("&release=2#notes"), "Lost ordinary URL context")
+            }
+            try expect(Diagnostics.redact("https://user:secret@example.com/feed") == "https://[REDACTED]@example.com/feed")
+            try expect(Diagnostics.redact("https://SYNTHETIC_USER@example.com/feed") == "https://[REDACTED]@example.com/feed")
+            try expect(Diagnostics.redact("Authorization: Bearer abc~def+/ghi== next") == "Authorization: Bearer [REDACTED] next")
+            let ordinary = "https://example.com/feed?release=2&architecture=arm64 source returned 401"
+            try expect(Diagnostics.redact(ordinary) == ordinary)
+        }
         await check("Report export redacts values without corrupting JSON") {
             let fixture = try Fixture(); defer { fixture.clean() }
             var app = try fixture.app()
             app.sparkleFeed = "https://user:secret@example.com/feed?token=secret"
-            app.detail = "Failure: https://example.com/?key=secret"
+            app.detail = "Failure: https://example.com/?access_token=secret&refresh_token=secret&api_key=secret&X-Amz-Signature=secret&release=2"
             let data = try ReportExport.data(apps: [app], sources: [], history: [], lastScan: nil)
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             try expect(json?["apps"] != nil)

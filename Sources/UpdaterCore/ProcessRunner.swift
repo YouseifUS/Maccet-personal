@@ -85,8 +85,15 @@ public final class ProcessRunner: CommandRunning {
 public enum Diagnostics {
     public static func redact(_ text: String) -> String {
         var value = text.replacingOccurrences(of: NSHomeDirectory(), with: "~")
-        for pattern in [#"(?i)(https?://)[^\s/@]+:[^\s/@]+@"#, #"(?i)([?&](?:token|key|secret|password|signature|auth)[^=\s]*=)[^&\s]+"#, #"(?i)(bearer\s+)[A-Za-z0-9._-]+"#] {
-            value = value.replacingOccurrences(of: pattern, with: "$1[REDACTED]", options: .regularExpression)
+        // Sanitize values before serialization. Keep URL separators and ordinary
+        // query fields so redacted diagnostics still identify the failing source.
+        let rules: [(String, String)] = [
+            (#"(?i)(https?://)[^\s/@]+@"#, "$1[REDACTED]@"),
+            (#"(?i)([?&](?:(?:access|refresh|id)[_-]?token|api[_-]?key|x-(?:amz|goog)-(?:signature|credential|security-token)|sig|(?:token|key|secret|password|signature|auth)[^=\s&]*)=)[^&\s#\"'<>]+"#, "$1[REDACTED]"),
+            (#"(?i)(bearer\s+)[A-Za-z0-9._~+/-]+=*"#, "$1[REDACTED]")
+        ]
+        for (pattern, replacement) in rules {
+            value = value.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
         }
         return value
     }

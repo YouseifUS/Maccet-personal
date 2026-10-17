@@ -134,6 +134,8 @@ open 'dist/Maccet.app'
 
 The build script creates the release executable, application bundle, generated icon, and a ZIP archive in `dist/`. It signs the local app with an ad-hoc signature. The app is **not Developer ID signed or notarized**, and this alpha is not a public distribution release. Developer ID signing and notarization require the owner's signing configuration and remain a separate release step.
 
+An optional owner-operated Developer ID workflow is available through `bash scripts/release.sh`. It requires a real signing identity, expected team and an existing notarytool Keychain profile. It publishes a separate distribution directory only after Developer ID/runtime/timestamp, accepted notarization, stapling, Gatekeeper and extracted-artifact checks pass. No Developer ID/notarized deliverable is claimed by the workflow's controlled tests. See [distribution configuration and acceptance](docs/DISTRIBUTION.md).
+
 The minimum tools version in the manifest is Swift 5.9. Testing older compiler/SDK combinations remains part of the wider support matrix; the validation document names the toolchain used for this build.
 
 ## Checks and read-only diagnostics

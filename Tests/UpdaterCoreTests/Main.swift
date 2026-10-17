@@ -926,6 +926,59 @@ private enum Checks {
                 try expect(setup.actions.isEmpty && !setup.runner.calls.contains { $0.executable == "/usr/bin/xcode-select" })
             }
         }
+        await check("Metadata refresh requests API checks and port sync without broader preparation") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let runner = FakeRunner { call in
+                if call.args == ["--version"] { return CommandResult(output: "Homebrew 7.0.9") }
+                if call.args == ["version"] { return CommandResult(output: "Version: 2.12.7") }
+                if call.args == ["outdated", "--cask", "--greedy", "--json=v2"] { return CommandResult(output: #"{"casks":[]}"#) }
+                if call.executable == "/bin/bash", call.args.last == "ports-sync" { return CommandResult() }
+                throw UpdaterError("Broader maintenance requested")
+            }
+            let cache = fixture.root.appendingPathComponent("MetadataCache")
+            let service = SourceMetadataRefresh(runner: runner, cacheRoot: cache, locate: { $0 == "brew" ? "/opt/homebrew/bin/brew" : $0 == "port" ? "/opt/local/bin/port" : nil }, homebrewAPIEnabled: true)
+            let results = await service.refresh(inventory: AppInventory().discover(roots: [fixture.root.path]))
+            try expect(results[0].phase == .ready && results[1].phase == .ready && results[2].phase == .notRequired)
+            let api = runner.calls.first { $0.args.first == "outdated" }!
+            try expect(api.environment["HOMEBREW_NO_AUTO_UPDATE"] == "1" && api.environment["HOMEBREW_FORCE_API_AUTO_UPDATE"] == "1" && api.environment["HOMEBREW_API_AUTO_UPDATE_SECS"] == "0")
+            try expect(api.environment["HOMEBREW_CACHE"] == cache.appendingPathComponent("Homebrew").path)
+            try expect(runner.calls.count == 4 && !runner.calls.contains { $0.args.contains("install") || $0.args.contains("upgrade") || $0.args.contains("brew-update") || $0.args.contains("ports-update") })
+        }
+        await check("Metadata refresh never installs missing tools or expands disabled and store-only scopes") {
+            let setup = SetupFixture(); setup.paths = [:]
+            let service = SourceMetadataRefresh(runner: setup.runner, locate: { setup.paths[$0] })
+            let missing = await service.refresh()
+            try expect(missing[0].phase == .unavailable && missing[1].phase == .notRequired && missing[2].phase == .notRequired && setup.runner.calls.isEmpty)
+            let disabled = await service.refresh(disabledSources: Set(UpdateSource.allCases))
+            try expect(disabled.allSatisfy { $0.phase == .disabled } && setup.runner.calls.isEmpty)
+            let fixture = try Fixture(); defer { fixture.clean() }
+            var inventory = AppInventory().discover(roots: [fixture.root.path]); inventory.apps[0].hasStoreReceipt = true
+            let storeOnly = await service.refresh(inventory: inventory)
+            try expect(storeOnly.allSatisfy { $0.phase == .notRequired } && setup.runner.calls.isEmpty)
+        }
+        await check("Metadata failures remain independent and Git mode does not broaden its request") {
+            for gitMode in [false, true] {
+                let runner = FakeRunner { call in
+                    if call.args == ["--version"] { return CommandResult(output: "Homebrew 7.0.9") }
+                    if call.args == ["version"] { return CommandResult(output: "Version: 2.12.7") }
+                    if call.args.first == "outdated" { return CommandResult(status: 1, errorOutput: "Offline") }
+                    if call.executable == "/bin/bash", call.args.last == "ports-sync" { return CommandResult() }
+                    throw UpdaterError("Unexpected maintenance")
+                }
+                let service = SourceMetadataRefresh(runner: runner, locate: { $0 == "brew" ? "/opt/homebrew/bin/brew" : $0 == "port" ? "/opt/local/bin/port" : nil }, homebrewAPIEnabled: !gitMode)
+                let results = await service.refresh()
+                try expect(results[0].phase == .failed && results[1].phase == .ready)
+                try expect(!runner.calls.contains { $0.args.contains("brew-update") || $0.args.contains("ports-update") || $0.args.contains("mas-update") || $0.executable == "/usr/bin/curl" })
+                if gitMode { try expect(!runner.calls.contains { $0.args.first == "outdated" }) }
+            }
+        }
+        await check("Metadata refresh rejects changed tool destinations before index mutation") {
+            var brew = "/usr/bin/true"
+            let runner = FakeRunner { _ in brew = "/usr/bin/false"; return CommandResult(output: "Homebrew 7.0.9") }
+            let service = SourceMetadataRefresh(runner: runner, locate: { $0 == "brew" ? brew : nil })
+            let results = await service.refresh(disabledSources: [.macPorts, .appStore])
+            try expect(results[0].phase == .failed && runner.calls.count == 1)
+        }
         await check("Explicit preparation updates all three dependencies without upgrading applications") {
             let fixture = SetupFixture()
             var snapshots: [[SetupItem]] = []

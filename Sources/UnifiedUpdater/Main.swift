@@ -82,14 +82,19 @@ struct DesktopApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var model: AppModel?
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let model = Self.model, model.updating || model.maintainingSources else { return .terminateNow }
+        guard let model = Self.model, model.preventsQuit else { return .terminateNow }
         let alert = NSAlert()
-        alert.messageText = model.maintainingSources ? "Sources are still being prepared" : "An update is still running"
-        alert.informativeText = model.maintainingSources
-            ? "Keep the app open until source setup finishes. You can cancel authorization in the macOS dialog. An active installer must finish before the app quits."
-            : "Keep the app open until the active installer finishes. You can cancel the remaining apps and quit after the current operation completes."
+        if model.refreshingMetadata {
+            alert.messageText = "Source metadata is still refreshing"
+            alert.informativeText = "Keep Maccet open until the active metadata request finishes. You can cancel authorization in the macOS dialog."
+        } else {
+            alert.messageText = model.maintainingSources ? "Sources are still being prepared" : "An update is still running"
+            alert.informativeText = model.maintainingSources
+                ? "Keep the app open until source setup finishes. You can cancel authorization in the macOS dialog. An active installer must finish before the app quits."
+                : "Keep the app open until the active installer finishes. You can cancel the remaining apps and quit after the current operation completes."
+        }
         alert.addButton(withTitle: "Keep Maccet Open")
-        if !model.maintainingSources { alert.addButton(withTitle: "Cancel Remaining") }
+        if model.updating { alert.addButton(withTitle: "Cancel Remaining") }
         if alert.runModal() == .alertSecondButtonReturn { model.cancelRequested = true }
         return .terminateCancel
     }

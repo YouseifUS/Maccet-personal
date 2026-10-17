@@ -24,6 +24,8 @@ MacPorts is optional. Preparation uses an existing manager, known MacPorts owner
 
 A working App Store helper is checked directly during launch; its package manager and Apple developer tools are required only when the chosen maintenance action needs them. Missing or broken helpers still require attention.
 
+Choose **Sources → Refresh Metadata** to request package data with installed tools and then rescan applications. Homebrew uses API refresh flags with Git/tool auto-update disabled; MacPorts uses `port sync`. Results and last-attempt time are separate from tool-preparation results. Homebrew can reuse verified cached data when upstream is unavailable, so a completed request is not a freshness guarantee; Git-tap-only mode reports an unsupported request instead of broadening into tool maintenance.
+
 Choose **Sources → Prepare Sources** to install missing tools and maintain required sources. Partial preparation failures offer **Retry Setup**, while available sources can still check apps. See [source readiness and preparation](docs/STARTUP_SETUP.md) for prerequisites, authorization, and platform limitations.
 
 Installing a manager does not make it the owner of existing direct-download applications. Coverage still depends on verified ownership; a missing or failed source cannot claim complete coverage.
@@ -89,7 +91,7 @@ Explicit source preparation installs or updates the source tools themselves, inc
 | App Store | Store inventory and update actions using the same shared queue |
 | Activity | Live task stages, persisted update attempts, verification and failure explanations, rescan before retry |
 | Cleanup | Cleanup policy and per-attempt results; no broad delete action |
-| Sources | Readiness and explicit preparation results, retry, canonical paths, versions, errors, scan enable/disable, and documentation |
+| Sources | Separate metadata requests and tool preparation, per-source results, retry, canonical paths, versions, errors, scan controls, and documentation |
 | Settings | Application folders, exclusion reset, and privacy/behavior information |
 
 Right-click an app for details, Reveal in Finder, Ignore App, or Skip This Release. **Show ignored** reveals excluded entries; **Settings → Reset All Exclusions** restores them.
@@ -108,7 +110,7 @@ Shared Homebrew caches, general app caches, user preferences, licenses, and docu
 
 **Cancel Remaining** cancels queued work and prevents installation when cancellation arrives before the install stage. An active installation is allowed to finish safely; it is not forcibly terminated. Independent failures do not stop the rest of a valid queue. macOS may show an authorization dialog for each store update.
 
-MacPorts checks use the existing local ports index; the UI labels that limitation. **Prepare Sources** runs `port -N selfupdate` with macOS authorization before rescanning. Launch and diagnostic scans use the existing local index. An update preview uses `port -y -N upgrade <name>`; the reviewed installation uses one named package and may update required dependencies shown in the preview. macOS authorization is requested for the standard root-owned installation. Shared MacPorts caches and inactive versions are retained. Revision-only and incomparable vendor changes require manual verification.
+MacPorts checks use the existing local ports index; the UI labels that limitation. **Refresh Metadata** runs `port -N sync` for index data; **Prepare Sources** runs `port -N selfupdate`, which can also update MacPorts itself, with macOS authorization before rescanning. Launch and diagnostic scans use the existing local index. An update preview uses `port -y -N upgrade <name>`; the reviewed installation uses one named package and may update required dependencies shown in the preview. macOS authorization is requested for the standard root-owned installation. Shared MacPorts caches and inactive versions are retained. Revision-only and incomparable vendor changes require manual verification.
 
 ## Build from source
 

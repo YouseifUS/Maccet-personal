@@ -38,6 +38,7 @@ public struct BrewCask {
     public var macOSMinimum: String?
     public var displayVersion: String?
     public var buildVersion: String?
+    public var sha256: String?
 }
 
 public struct HomebrewAdapter {
@@ -84,7 +85,8 @@ public struct HomebrewAdapter {
             return BrewCask(token: token, version: version, installed: installed, targets: targets,
                 simpleApp: targets.count == 1 && !complex, pinned: value["pinned"] as? Bool ?? false,
                 disabled: value["disabled"] as? Bool ?? false, macOSMinimum: minimum,
-                displayVersion: value["bundle_short_version"] as? String, buildVersion: value["bundle_version"] as? String)
+                displayVersion: value["bundle_short_version"] as? String, buildVersion: value["bundle_version"] as? String,
+                sha256: (value["sha256"] as? String)?.lowercased())
         }
     }
     public static func parseOutdated(_ text: String) throws -> Set<String> {
@@ -136,9 +138,14 @@ public struct HomebrewAdapter {
             }
             app.targetVersion = cask.version
             app.targetBuild = cask.buildVersion
+            app.targetSHA256 = cask.sha256
             app.state = .updateAvailable; app.automatic = cask.simpleApp && !cask.pinned && !cask.disabled
             app.detail = "Managed by Homebrew. The update will be checked again before installation."
             if !app.automatic { app.state = .manual; app.detail = "Pinned, disabled, or complex installer cask. Update through Homebrew manually." }
+            if cask.sha256?.range(of: #"\A[0-9a-f]{64}\z"#, options: .regularExpression) == nil {
+                app.state = .manual; app.automatic = false
+                app.detail = "This cask has no valid SHA-256 digest to review. Update through Homebrew manually."
+            }
             if cask.version.split(separator: ",").contains(where: { ReleaseComparison.compare(String($0), String($0)) == nil }) {
                 app.state = .manual; app.automatic = false; app.detail = "This vendor version needs a source-specific verifier. Update through Homebrew manually."
             }
@@ -154,7 +161,8 @@ public struct HomebrewAdapter {
     public func preview(_ app: AppRecord) async throws -> String {
         guard let id = app.packageID else { throw UpdaterError("Missing cask identity.") }
         try ToolLocator.validatePackageID(id)
-        return try await command(["upgrade", "--dry-run", "--cask", "--greedy", "--no-quit", "--skip-cask-deps", id])
+        let preview = try await command(["upgrade", "--dry-run", "--cask", "--greedy", "--no-quit", "--skip-cask-deps", id])
+        return "Package SHA-256: " + (app.targetSHA256 ?? "Unavailable") + "\n" + preview
     }
     public func upgrade(_ app: AppRecord) async throws {
         guard let id = app.packageID else { throw UpdaterError("Missing cask identity.") }

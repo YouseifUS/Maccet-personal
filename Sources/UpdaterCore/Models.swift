@@ -45,6 +45,7 @@ public struct AppRecord: Codable, Identifiable, Equatable {
     public var targetVersion: String?
     public var targetBuild: String?
     public var targetPackageVersion: String?
+    public var targetSHA256: String?
     public var state: CheckState = .unchecked
     public var detail: String = "No supported source has checked this application."
     public var checkedAt: Date?
@@ -117,6 +118,7 @@ public struct UpdateRoute: Codable, Equatable, Identifiable {
     public var targetVersion: String?
     public var targetBuild: String?
     public var targetPackageVersion: String?
+    public var targetSHA256: String?
     public var state: CheckState
     public var detail: String
     public var checkedAt: Date?
@@ -126,14 +128,14 @@ public struct UpdateRoute: Codable, Equatable, Identifiable {
         guard let source = app.source else { return nil }
         self.source = source; packageID = app.packageID; targetVersion = app.targetVersion
         targetBuild = app.targetBuild; state = app.state; detail = app.detail
-        targetPackageVersion = app.targetPackageVersion
+        targetPackageVersion = app.targetPackageVersion; targetSHA256 = app.targetSHA256
         checkedAt = app.checkedAt; automatic = app.automatic; executable = app.routeExecutable
     }
     public func applying(to original: AppRecord) -> AppRecord {
         var app = original
         app.source = source; app.packageID = packageID; app.targetVersion = targetVersion
         app.targetBuild = targetBuild; app.state = state; app.detail = detail
-        app.targetPackageVersion = targetPackageVersion
+        app.targetPackageVersion = targetPackageVersion; app.targetSHA256 = targetSHA256
         app.checkedAt = checkedAt; app.automatic = automatic; app.routeExecutable = executable
         return app
     }
@@ -152,7 +154,7 @@ public enum SourceResolver {
         if allowed.count == 1 { return allowed[0].applying(to: app) }
         if allowed.count > 1 {
             app.source = nil; app.packageID = nil; app.targetVersion = nil; app.targetBuild = nil
-            app.targetPackageVersion = nil
+            app.targetPackageVersion = nil; app.targetSHA256 = nil
             app.routeExecutable = nil; app.automatic = false; app.state = .ambiguous
             app.detail = "Several managers claim this application. Choose one verified route in Details before updating."
         }

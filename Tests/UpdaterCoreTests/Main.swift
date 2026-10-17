@@ -36,8 +36,10 @@ private struct Fixture {
     }
     func clean() { try? FileManager.default.removeItem(at: root) }
     func app() throws -> AppRecord { try AppInventory().read(appURL.path) }
-    func brewJSON(target: String = "2.0") throws -> String {
-        let json: [String: Any] = ["casks": [["token": "example", "version": target, "installed": "1.0", "artifacts": [["app": ["Example.app"], "target": appURL.path]], "auto_updates": true]]]
+    func brewJSON(target: String = "2.0", sha256: String? = String(repeating: "a", count: 64)) throws -> String {
+        var cask: [String: Any] = ["token": "example", "version": target, "installed": "1.0", "artifacts": [["app": ["Example.app"], "target": appURL.path]], "auto_updates": true]
+        cask["sha256"] = sha256
+        let json: [String: Any] = ["casks": [cask]]
         return String(decoding: try JSONSerialization.data(withJSONObject: json), as: UTF8.self)
     }
     func candidate() throws -> AppRecord {
@@ -174,6 +176,43 @@ private enum Checks {
             let fixture = try Fixture(); defer { fixture.clean() }
             let candidate = try fixture.candidate()
             try expect(candidate.state == .updateAvailable && candidate.automatic && candidate.packageID == "example")
+        }
+        await check("Homebrew requires a complete SHA-256 for automatic updates") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            for digest: String? in [nil, "", "no_check", "abc", String(repeating: "g", count: 64), String(repeating: "a", count: 63), String(repeating: "a", count: 64) + "\n"] {
+                let casks = try HomebrewAdapter.parseCasks(fixture.brewJSON(sha256: digest))
+                let app = HomebrewAdapter.apply(casks: casks, outdated: ["example"], to: [try fixture.app()], executable: "/usr/bin/true")[0]
+                try expect(app.state == .manual && !app.automatic && app.hasUpdate, "Unreviewable digest allowed automatic installation")
+            }
+        }
+        await check("Reviewed Homebrew digests survive route and report round trips") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let casks = try HomebrewAdapter.parseCasks(fixture.brewJSON(sha256: String(repeating: "A", count: 64)))
+            let app = HomebrewAdapter.apply(casks: casks, outdated: ["example"], to: [try fixture.app()], executable: "/usr/bin/true")[0]
+            try expect(app.automatic && app.targetSHA256 == String(repeating: "a", count: 64))
+            let route = try JSONDecoder().decode(UpdateRoute.self, from: JSONEncoder().encode(UpdateRoute(app)!))
+            try expect(route.applying(to: try fixture.app()).targetSHA256 == app.targetSHA256)
+            var old = try JSONSerialization.jsonObject(with: JSONEncoder().encode(app)) as! [String: Any]
+            old.removeValue(forKey: "targetSHA256")
+            let legacy = try JSONDecoder().decode(AppRecord.self, from: JSONSerialization.data(withJSONObject: old))
+            try expect(legacy.targetSHA256 == nil)
+        }
+        await check("A changed Homebrew digest blocks either preflight before installation") {
+            for isolatedOnly in [false, true] {
+                let fixture = try Fixture(); defer { fixture.clean() }
+                let runner = try fixture.runner { try fixture.write(version: "2.0", build: "20") }
+                let original = runner.handler
+                runner.handler = { call in
+                    if call.args.first == "info", !isolatedOnly || call.environment["HOMEBREW_CACHE"]?.contains("Operations") == true {
+                        return CommandResult(output: try fixture.brewJSON(sha256: String(repeating: "b", count: 64)))
+                    }
+                    return try original(call)
+                }
+                let engine = UpdateEngine(runner: runner, cacheRoot: fixture.root.appendingPathComponent("Cache"), sourcePaths: [.homebrew: "/usr/bin/true"])
+                let result = await engine.execute(PlannedUpdate(app: try fixture.candidate(), preview: ""), cleanup: false) { _, _ in }
+                try expect(result.state == .failed && !runner.calls.contains { $0.args.first == "upgrade" })
+                try expect(try fixture.app().version == "1.0")
+            }
         }
         await check("A catalog name alone cannot claim an application") {
             let fixture = try Fixture(); defer { fixture.clean() }

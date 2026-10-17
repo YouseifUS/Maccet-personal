@@ -66,7 +66,7 @@ private final class ControlledRunner: CommandRunning {
         try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: folder.appendingPathComponent("Info.plist"), options: .atomic)
     }
     func brewJSON() throws -> String {
-        let values: [[String: Any]] = keys.map { ["token": $0, "version": "2.0", "installed": "1.0", "artifacts": [["app": [$0 + ".app"], "target": root.appendingPathComponent("Applications/\($0).app").path]]] }
+        let values: [[String: Any]] = keys.map { ["token": $0, "sha256": String(repeating: "a", count: 64), "version": "2.0", "installed": "1.0", "artifacts": [["app": [$0 + ".app"], "target": root.appendingPathComponent("Applications/\($0).app").path]]] }
         return String(decoding: try JSONSerialization.data(withJSONObject: ["casks": values]), as: UTF8.self)
     }
     func outdatedJSON() throws -> String {

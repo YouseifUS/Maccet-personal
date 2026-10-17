@@ -86,7 +86,7 @@ Right-click an app for details, Reveal in Finder, Ignore App, or Skip This Relea
 
 Homebrew updates are scoped to a named cask with `--no-quit` and `--skip-cask-deps`. Homebrew's automatic cleanup is disabled for these invocations. A dry run is shown before execution. Homebrew can still perform its own necessary installation actions, such as binary linking; related changes reported by its preview are visible in the review sheet.
 
-The first alpha supports automatic updates for simple, specifically versioned app casks whose target metadata can be verified. Pinned, disabled, complex installer, non-numeric vendor-version, and ambiguous cases require manual attention. Apps installed outside Homebrew are not silently adopted, even if they appear in its catalog.
+The first alpha supports automatic updates for simple, specifically versioned app casks whose target metadata can be verified. A complete SHA-256 package digest is required and must remain unchanged through review and both preflight checks. Missing, malformed, and `no_check` digests require manual attention, as do pinned, disabled, complex installer, non-numeric vendor-version, and ambiguous cases. Apps installed outside Homebrew are not silently adopted, even if they appear in its catalog.
 
 App Store operations use a fixed `mas` executable and validated numeric store ID. The app does not collect or store your Apple Account or administrator password. If a store operation fails, open App Store from the app row and resolve the issue there.
 

@@ -34,6 +34,8 @@ final class AppModel: ObservableObject {
     @Published var setupItems = DependencySetup.initialItems
     @Published var includeMacPortsInPreparation = false
     @Published var refreshingMetadata = false
+    @Published var refreshingDiscoveryCatalog = false
+    @Published var discoveryStatus = DiscoveryCatalogStatus(state: .notConfigured, message: "No discovery publisher is configured. Manager checks remain independent.")
     @Published var metadataRefreshItems: [SetupItem] = []
     @Published var lastMetadataRefreshAttempt: Date?
     private var startupStarted = false
@@ -56,7 +58,8 @@ final class AppModel: ObservableObject {
     let runner: any CommandRunning
     private let setupLocate: (String) -> String?
     private let sourcePaths: [UpdateSource: String]?
-    var busy: Bool { settingUp || refreshingMetadata || scanning || preparing || updating }
+    private let discoveryLoader: any SourceCatalogLoading
+    var busy: Bool { settingUp || refreshingMetadata || refreshingDiscoveryCatalog || scanning || preparing || updating }
     var preventsQuit: Bool { updating || maintainingSources || refreshingMetadata }
     var setupNeedsAttention: Bool { setupItems.contains { $0.phase.needsAttention } }
     var setupActionTitle: String { setupWasPrepared ? (setupNeedsAttention ? "Retry Setup" : "Prepare Sources Again") : "Prepare Sources" }
@@ -85,8 +88,9 @@ final class AppModel: ObservableObject {
         }
     }
 
-    init(runner: any CommandRunning = ProcessRunner(), sourcePaths: [UpdateSource: String]? = nil, setupLocate: @escaping (String) -> String? = ToolLocator.find) {
+    init(runner: any CommandRunning = ProcessRunner(), sourcePaths: [UpdateSource: String]? = nil, discoveryLoader: any SourceCatalogLoading = SourceCatalogLoader(), setupLocate: @escaping (String) -> String? = ToolLocator.find) {
         self.runner = runner
+        self.discoveryLoader = discoveryLoader
         self.setupLocate = setupLocate
         self.sourcePaths = sourcePaths
         let override = ProcessInfo.processInfo.environment["UNIFIED_UPDATER_DATA_DIR"]
@@ -117,6 +121,46 @@ final class AppModel: ObservableObject {
 
     func prepareSources() {
         runSourceSetup(prepareTools: true)
+    }
+
+    func configureDiscoveryCatalog(_ configuration: DiscoveryCatalogConfiguration?) throws {
+        guard !busy else { throw UpdaterError("Wait for the current operation to finish.") }
+        try configuration?.validate()
+        var updated = preferences; updated.discoveryCatalog = configuration
+        try store.save(updated, file: "preferences.json")
+        preferences = updated
+        discoveryStatus = configuration.map { SourceDiscoveryService(root: cacheRoot.appendingPathComponent("Discovery"), configuration: $0, loader: discoveryLoader).load().status }
+            ?? DiscoveryCatalogStatus(state: .notConfigured, message: "Discovery is disabled. No catalog request will run.")
+        invalidateInventory()
+    }
+    func refreshDiscovery() {
+        guard !busy, let configuration = preferences.discoveryCatalog else { return }
+        refreshingDiscoveryCatalog = true; selected = []; review = []; showingReview = false
+        status = "Refreshing the signed discovery catalog…"
+        Task { [self] in
+            let result = await SourceDiscoveryService(root: cacheRoot.appendingPathComponent("Discovery"), configuration: configuration, loader: discoveryLoader).refresh()
+            discoveryStatus = result.status
+            refreshingDiscoveryCatalog = false
+            scan()
+        }
+    }
+    func reviewDiscoveryChannel(_ channel: String?, for app: AppRecord) {
+        guard !busy else { return }
+        do {
+            var updated = preferences
+            if let channel {
+                guard channel.range(of: #"\A[a-z0-9][a-z0-9._-]{0,31}\z"#, options: .regularExpression) != nil,
+                      let fresh = try? AppInventory().read(app.path), fresh.path == app.path, fresh.bundleID == app.bundleID,
+                      fresh.version == app.version, fresh.build == app.build,
+                      let team = InstalledPublisherIdentity.teamIdentifier(at: app.path) else {
+                    throw UpdaterError("A channel review requires the unchanged application and a valid certificate-signed publisher. Unknown publisher evidence remains provisional.")
+                }
+                if updated.discoveryChannelReviews == nil { updated.discoveryChannelReviews = [:] }
+                updated.discoveryChannelReviews?[app.id] = DiscoveryChannelReview(path: app.path, bundleID: app.bundleID, teamIdentifier: team, channel: channel)
+            } else { updated.discoveryChannelReviews?.removeValue(forKey: app.id) }
+            try store.save(updated, file: "preferences.json"); preferences = updated
+            invalidateInventory(); scan()
+        } catch { self.errorTitle = "Discovery review needs attention"; self.error = Diagnostics.redact(error.localizedDescription) }
     }
 
     func refreshSourceMetadata() {
@@ -179,7 +223,13 @@ final class AppModel: ObservableObject {
         scanning = true; selected.removeAll(); status = "Reading applications and checking sources…"
         let prefs = preferences
         Task { [self] in
-            let result = await ScanService(runner: runner, cacheRoot: cacheRoot, sourcePaths: sourcePaths).scan(preferences: prefs) { [weak self] partial in
+            var service = ScanService(runner: runner, cacheRoot: cacheRoot, sourcePaths: sourcePaths)
+            if let configuration = prefs.discoveryCatalog {
+                let root = cacheRoot.appendingPathComponent("Discovery")
+                let snapshot = await Task.detached { SourceDiscoveryService(root: root, configuration: configuration).load() }.value
+                discoveryStatus = snapshot.status; service.discoveryCatalog = snapshot.catalog
+            }
+            let result = await service.scan(preferences: prefs) { [weak self] partial in
                 await MainActor.run {
                     self?.apps = partial.apps; self?.sources = partial.sources; self?.warnings = partial.warnings
                 }

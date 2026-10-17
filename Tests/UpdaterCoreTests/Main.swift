@@ -404,6 +404,135 @@ private enum Checks {
             let managedResult = await managed.scan(preferences: prefs)
             try expect(managedLoader.requested.isEmpty && managedResult.apps[0].source == .homebrew)
         }
+        await check("Discovery refresh caches authenticated dated catalogs, limits requests and preserves valid offline results") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let now = Date(); let key = Curve25519.Signing.PrivateKey()
+            var catalog = catalogFixture(try fixture.app(), now: now); catalog.expiresAt = now.addingTimeInterval(7200)
+            let loader = FixtureCatalogLoader(bytes: try signedCatalog(catalog, key: key))
+            let configuration = DiscoveryCatalogConfiguration(endpoint: URL(string: "https://catalog.example.com/catalog.json")!, keyID: "test", publicKey: key.publicKey.rawRepresentation.base64EncodedString())
+            let service = SourceDiscoveryService(root: fixture.root.appendingPathComponent("Discovery"), configuration: configuration, loader: loader)
+            try expect(service.load(now: now).catalog == nil && loader.calls == 0)
+            let first = await service.refresh(now: now)
+            try expect(first.catalog?.revision == 2 && first.status.state == .ready && first.status.lastSuccess != nil)
+            _ = await service.refresh(now: now.addingTimeInterval(10))
+            try expect(loader.calls == 1)
+            loader.failure = UpdaterError("Offline Bearer PRIVATE_FIXTURE_TOKEN")
+            let offline = await service.refresh(now: now.addingTimeInterval(3601))
+            try expect(offline.catalog?.revision == 2 && offline.status.state == .cached && offline.status.error != nil)
+            try expect(!(offline.status.error ?? "").contains("PRIVATE_FIXTURE_TOKEN"))
+            try expect(service.load(now: now.addingTimeInterval(3602)).status.error != nil, "A scan erased the last refresh failure")
+            _ = await service.refresh(now: now.addingTimeInterval(3610))
+            try expect(loader.calls == 2, "Failure retry ignored its one-minute limit")
+            loader.failure = nil; loader.bytes = Data("untrusted response".utf8)
+            let invalid = await service.refresh(now: now.addingTimeInterval(3662))
+            try expect(invalid.catalog?.revision == 2 && invalid.status.error != nil)
+            try expect(service.load(now: now.addingTimeInterval(7201)).catalog == nil, "Expired candidates were reused")
+            var next = catalogFixture(try fixture.app(), now: now.addingTimeInterval(7300), revision: 3)
+            next.expiresAt = now.addingTimeInterval(20000)
+            loader.bytes = try signedCatalog(next, key: key)
+            let refreshed = await service.refresh(now: now.addingTimeInterval(7300))
+            try expect(refreshed.catalog?.revision == 3)
+            loader.bytes = try signedCatalog(catalogFixture(try fixture.app(), now: now.addingTimeInterval(11000), revision: 1), key: key)
+            let rollback = await service.refresh(now: now.addingTimeInterval(11000))
+            try expect(rollback.catalog?.revision == 3 && rollback.status.error?.contains("rollback") == true)
+        }
+        await check("Discovery refresh serializes across instances and never accepts data after cancellation or expiry") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let now = Date(); let key = Curve25519.Signing.PrivateKey(); let bytes = try signedCatalog(catalogFixture(try fixture.app(), now: now), key: key)
+            let configuration = DiscoveryCatalogConfiguration(endpoint: URL(string: "https://catalog.example.com/catalog.json")!, keyID: "test", publicKey: key.publicKey.rawRepresentation.base64EncodedString())
+            let loader = GatedCatalogLoader(bytes: bytes)
+            let service = SourceDiscoveryService(root: fixture.root.appendingPathComponent("Gated"), configuration: configuration, loader: loader)
+            let pending = Task { await service.refresh(now: now) }
+            while !(await loader.entered) { try await Task.sleep(nanoseconds: 1_000_000) }
+            let simultaneous = await service.refresh(now: now)
+            await loader.release()
+            let completed = await pending.value
+            let calls = await loader.calls
+            try expect(calls == 1 && simultaneous.catalog == nil && completed.catalog?.revision == 2)
+            let canceledLoader = FixtureCatalogLoader(bytes: bytes)
+            let canceledService = SourceDiscoveryService(root: fixture.root.appendingPathComponent("Canceled"), configuration: configuration, loader: canceledLoader)
+            let canceled = Task { await canceledService.refresh(now: now) }; canceled.cancel()
+            let result = await canceled.value
+            try expect(result.catalog == nil && canceledService.load(now: now).catalog == nil)
+            let expiryNow = Date(timeIntervalSince1970: floor(now.timeIntervalSince1970))
+            var expiring = catalogFixture(try fixture.app(), now: expiryNow); expiring.expiresAt = expiryNow.addingTimeInterval(1)
+            let delayed = FixtureCatalogLoader(bytes: try signedCatalog(expiring, key: key)); delayed.delay = 1_100_000_000
+            let expired = await SourceDiscoveryService(root: fixture.root.appendingPathComponent("Expired"), configuration: configuration, loader: delayed).refresh(now: expiryNow)
+            try expect(expired.catalog == nil, "Catalog expiry was checked only before the request")
+        }
+        await check("Discovery matches exact installed identities and keeps channels and local copies independent") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let now = Date(); let app = try fixture.app()
+            let catalog = try authenticatedCatalog(catalogFixture(app, now: now), root: fixture.root, now: now)
+            let review = DiscoveryChannelReview(path: app.path, bundleID: app.bundleID, teamIdentifier: "TEAMID1234", channel: "stable")
+            let matched = SourceDiscoveryService.candidates(for: app, catalog: catalog, review: review, now: now, macOS: "27.0", architecture: .arm64, teamIdentifier: "TEAMID1234")
+            try expect(matched.count == 1 && matched[0].assessment == .matched)
+            var copy = app; copy.path = fixture.root.appendingPathComponent("Copy.app").path
+            let copyResult = SourceDiscoveryService.candidates(for: copy, catalog: catalog, review: review, now: now, teamIdentifier: "TEAMID1234")
+            try expect(copyResult[0].assessment == .provisional)
+            var wrongNameMatch = app; wrongNameMatch.bundleID = "unrelated.bundle"
+            try expect(SourceDiscoveryService.candidates(for: wrongNameMatch, catalog: catalog, review: review, now: now).isEmpty)
+            let unknown = SourceDiscoveryService.candidates(for: app, catalog: catalog, review: nil, now: now, teamIdentifier: "TEAMID1234")
+            try expect(unknown[0].assessment == .provisional)
+            let wrongPublisher = SourceDiscoveryService.candidates(for: app, catalog: catalog, review: review, now: now, teamIdentifier: "OTHER12345")
+            try expect(wrongPublisher[0].assessment == .conflict)
+            let beta = DiscoveryChannelReview(path: app.path, bundleID: app.bundleID, teamIdentifier: "TEAMID1234", channel: "beta")
+            try expect(SourceDiscoveryService.candidates(for: app, catalog: catalog, review: beta, now: now, teamIdentifier: "TEAMID1234")[0].assessment == .conflict)
+            var receipt = app; receipt.hasStoreReceipt = true
+            try expect(SourceDiscoveryService.candidates(for: receipt, catalog: catalog, review: review, now: now).isEmpty)
+            try expect(SourceDiscoveryService.candidates(for: app, catalog: catalog, review: review, now: now.addingTimeInterval(7200)).isEmpty)
+        }
+        await check("Catalog suggestions appear beyond installed ownership without granting coverage or an executable route") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let now = Date(); let catalog = try authenticatedCatalog(catalogFixture(try fixture.app(), now: now), root: fixture.root, now: now)
+            let runner = FakeRunner { _ in throw UpdaterError("Unexpected command") }
+            var service = ScanService(runner: runner, sourcePaths: [:]); service.discoveryCatalog = catalog
+            var prefs = Preferences(); prefs.scanRoots = [fixture.appURL.path]; prefs.includeSystemApplications = false
+            let result = await service.scan(preferences: prefs)
+            let app = result.apps[0]
+            try expect(app.catalogCandidates?.count == 1 && app.source == nil && app.routes?.isEmpty != false)
+            try expect(app.state == .unchecked && result.checkedCount == 0 && !prefs.isEligible(app) && runner.calls.isEmpty)
+            let restored = try JSONDecoder().decode(ScanResult.self, from: JSONEncoder().encode(result))
+            try expect(restored.apps[0].catalogCandidates?.first?.id == "example")
+            do { _ = try await UpdateEngine(runner: runner, sourcePaths: [:]).prepare([app], preferences: prefs); throw CheckFailure(description: "Candidate became an executable plan") }
+            catch is UpdaterError { }
+            try expect(runner.calls.isEmpty)
+        }
+        await check("Shared metadata transport retains separate JSON/XML type and decoded-size bounds") {
+            let transport = BoundedMetadataLoader(protocolClasses: [FixtureFeedProtocol.self])
+            let url = URL(string: "https://catalog.example.com/catalog.json")!
+            FixtureFeedProtocol.responseStatus = 200
+            FixtureFeedProtocol.responseHeaders = ["Content-Type": "application/json"]
+            FixtureFeedProtocol.responseData = Data("{}".utf8)
+            let json = try await transport.load(url, maximumBytes: 2 * 1024 * 1024, mimeTypes: ["application/json"])
+            try expect(json == Data("{}".utf8))
+            for bytes in [Data(repeating: 65, count: 2 * 1024 * 1024 + 1)] {
+                FixtureFeedProtocol.responseData = bytes
+                do { _ = try await transport.load(url, maximumBytes: 2 * 1024 * 1024, mimeTypes: ["application/json"]); throw CheckFailure(description: "Oversized JSON accepted") }
+                catch let error as CheckFailure { throw error }
+                catch { }
+            }
+            FixtureFeedProtocol.responseData = Data("{}".utf8)
+            FixtureFeedProtocol.responseHeaders = ["Content-Type": "application/rss+xml"]
+            do { _ = try await transport.load(url, maximumBytes: 2 * 1024 * 1024, mimeTypes: ["application/json"]); throw CheckFailure(description: "Wrong metadata type accepted") }
+            catch let error as CheckFailure { throw error }
+            catch { }
+        }
+        await check("Discovery publisher configuration rejects unsafe URLs, invalid keys and revision floors") {
+            let key = Curve25519.Signing.PrivateKey()
+            let good = DiscoveryCatalogConfiguration(endpoint: URL(string: "https://catalog.example.com/catalog.json")!, keyID: "test", publicKey: key.publicKey.rawRepresentation.base64EncodedString())
+            try good.validate(); try expect(good.fingerprint.count == 64)
+            for field in ["url", "key", "id", "revision"] {
+                var changed = good
+                switch field {
+                case "url": changed.endpoint = URL(string: "http://catalog.example.com/catalog.json")!
+                case "key": changed.publicKey = "invalid"
+                case "id": changed.keyID = "untrusted key id"
+                default: changed.minimumRevision = 0
+                }
+                try expectThrows { try changed.validate() }
+            }
+        }
         await check("Signed catalogs retain known-good data and reject unknown publishers and rollback") {
             let fixture = try Fixture(); defer { fixture.clean() }
             let now = Date(); let key = Curve25519.Signing.PrivateKey(); let other = Curve25519.Signing.PrivateKey()

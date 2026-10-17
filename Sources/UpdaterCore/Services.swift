@@ -6,6 +6,7 @@ public struct ScanService {
     public let cacheRoot: URL?
     public let sourcePaths: [UpdateSource: String]
     public var sparkleChecker = SparkleCheck()
+    public var discoveryCatalog: AuthenticatedSourceMappingCatalog?
     public init(runner: any CommandRunning = ProcessRunner(), cacheRoot: URL? = nil, sourcePaths: [UpdateSource: String]? = nil) {
         self.runner = runner; self.cacheRoot = cacheRoot
         self.sourcePaths = sourcePaths ?? ToolLocator.defaultSources()
@@ -91,6 +92,11 @@ public struct ScanService {
             case .failed: result.apps[index].state = .failed
             }
             await onPartial?(result)
+        }
+        if let discoveryCatalog {
+            for index in result.apps.indices {
+                result.apps[index].catalogCandidates = SourceDiscoveryService.candidates(for: result.apps[index], catalog: discoveryCatalog, review: preferences.discoveryChannelReviews?[result.apps[index].id])
+            }
         }
         result.date = Date()
         return result

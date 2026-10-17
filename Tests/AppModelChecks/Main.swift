@@ -15,6 +15,10 @@ private final class ControlledRunner: CommandRunning {
         return try handler(call)
     }
 }
+private final class DiscoveryLoaderFixture: SourceCatalogLoading {
+    var calls = 0
+    func load(_ url: URL) async throws -> Data { calls += 1; return Data("{}".utf8) }
+}
 @MainActor private final class Session {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("maccet-model-check-" + UUID().uuidString)
     let runner = ControlledRunner()
@@ -24,13 +28,13 @@ private final class ControlledRunner: CommandRunning {
     var fail: Set<String> = []
     var cancelAfterFirst = false
     var keys: [String] = ["one", "two", "three"]
-    init() throws {
+    init(discoveryLoader: any SourceCatalogLoading = SourceCatalogLoader()) throws {
         // A harmless fixed executable identity is used only for path checks; the injected runner never launches it.
         executable = "/usr/bin/true"
         try FileManager.default.createDirectory(at: root.appendingPathComponent("Applications"), withIntermediateDirectories: true)
         setenv("UNIFIED_UPDATER_DATA_DIR", root.appendingPathComponent("Data").path, 1)
         for key in keys { try write(key, version: "1.0") }
-        model = AppModel(runner: runner, sourcePaths: [.homebrew: executable, .appStore: executable])
+        model = AppModel(runner: runner, sourcePaths: [.homebrew: executable, .appStore: executable], discoveryLoader: discoveryLoader)
         model.preferences.scanRoots = [root.appendingPathComponent("Applications").path]
         model.preferences.includeSystemApplications = false
         runner.handler = { [unowned self] call in
@@ -137,6 +141,25 @@ private final class ControlledRunner: CommandRunning {
             try await s.wait()
             try expect(s.installs.count == 1, "Remaining apps reached installation")
             try expect(s.model.history.filter { $0.state == .succeeded }.count == 1 && s.model.history.filter { $0.state == .canceled }.count == 2, "Active install was not verified independently of remaining cancellation")
+        }
+        await check("Discovery configuration requires explicit refresh, retains errors across scans and never grants unsigned channel evidence") {
+            let loader = DiscoveryLoaderFixture()
+            let s = try Session(discoveryLoader: loader); defer { s.clean() }
+            let configuration = DiscoveryCatalogConfiguration(endpoint: URL(string: "https://catalog.example.com/catalog.json")!, keyID: "fixture", publicKey: Data(repeating: 1, count: 32).base64EncodedString())
+            try s.model.configureDiscoveryCatalog(configuration)
+            try expect(loader.calls == 0 && s.model.preferences.discoveryCatalog == configuration, "Saving fetched data or lost publisher configuration")
+            s.model.scan(); try await s.wait()
+            try expect(loader.calls == 0, "A normal scan requested a remote catalog")
+            s.model.refreshDiscovery(); try await s.wait()
+            try expect(loader.calls == 1 && s.model.discoveryStatus.error != nil, "Unsigned response or refresh failure was hidden by the scan")
+            let app = try AppInventory().read(s.root.appendingPathComponent("Applications/one.app").path)
+            s.model.reviewDiscoveryChannel("stable", for: app)
+            try expect(s.model.preferences.discoveryChannelReviews?[app.id] == nil && s.model.error != nil, "Unsigned publisher gained verified channel evidence")
+            try s.model.configureDiscoveryCatalog(nil)
+            s.model.scan(); try await s.wait()
+            try expect(s.model.preferences.discoveryCatalog == nil && loader.calls == 1 && s.installs.isEmpty, "Disabled discovery fetched or installed applications")
+            let saved = try s.model.store.load(Preferences.self, file: "preferences.json")
+            try expect(saved.discoveryCatalog == nil, "Disabling discovery was not saved")
         }
         await check("Store filters, selection and missing-source attention remain truthful") {
             let s = try Session(); defer { s.clean() }

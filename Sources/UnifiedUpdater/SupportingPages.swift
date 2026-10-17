@@ -56,6 +56,7 @@ struct SourcesPage: View {
     @EnvironmentObject var model: AppModel
     @ViewState private var showSteps = true
     @ViewState private var showMetadata = true
+    @ViewState private var showingDiscoveryConfiguration = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -112,6 +113,23 @@ struct SourcesPage: View {
                             .font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                Surface {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Source discovery catalog").font(.system(size: 15, weight: .semibold))
+                            Spacer()
+                            Button("Configure Publisher") { showingDiscoveryConfiguration = true }.disabled(model.busy)
+                            Button("Refresh Discovery Catalog", action: model.refreshDiscovery).disabled(model.busy || model.preferences.discoveryCatalog == nil)
+                        }
+                        Text(model.discoveryStatus.message).font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                        if let error = model.discoveryStatus.error { Text("Last refresh failed: " + error).font(.system(size: 12)).foregroundStyle(StatusTone.failure.foreground).fixedSize(horizontal: false, vertical: true) }
+                        if let fetched = model.discoveryStatus.lastSuccess { Text("Last fetched: \(fetched.formatted(date: .abbreviated, time: .shortened))").font(.system(size: 12)).foregroundStyle(Maccet.secondary) }
+                        if let revision = model.discoveryStatus.revision { Text("Catalog revision \(revision)").font(.system(size: 12)) }
+                        if let expiry = model.discoveryStatus.expiresAt { Text("Expires: \(expiry.formatted(date: .abbreviated, time: .shortened))").font(.system(size: 12)).foregroundStyle(Maccet.secondary) }
+                        Text("A configured publisher can suggest sources beyond installed managers. Candidates do not establish ownership, checked-release coverage or installation permission. Scans reuse only an authenticated, unexpired cache.")
+                            .font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 ForEach(model.sources) { source in SourceCard(source: source) }
                 Text("These switches control checks and future source preparation. A disabled manager may still be needed for the enabled App Store helper.").font(.system(size: 12, weight: .medium)).foregroundStyle(Maccet.secondary)
                 if !model.warnings.isEmpty {
@@ -124,7 +142,7 @@ struct SourcesPage: View {
                 }
                 Text("Each installed copy uses one verified manager. Choose between conflicting routes in the application's Details.").font(.system(size: 12)).foregroundStyle(Maccet.secondary)
             }.padding(.horizontal, 28).padding(.bottom, 28)
-        }
+        }.sheet(isPresented: $showingDiscoveryConfiguration) { DiscoveryCatalogSheet() }
     }
 }
 private struct SourceCard: View {

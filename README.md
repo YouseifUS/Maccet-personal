@@ -16,7 +16,7 @@ Each adapter checks independently. Its evidence-backed routes are collected unde
 
 For example, a verified Homebrew route and a verified MacPorts route can both belong to one app. Choosing MacPorts means only MacPorts receives the install request for that app. Other applications in the same batch can use a different manager. An App Store receipt preserves store ownership.
 
-This release aggregates **installed-manager ownership results**, not the entire public catalogs of every manager. A matching catalog name cannot take over an existing application. Cross-catalog discovery and reviewed ownership transfer remain separate work.
+This release aggregates **installed-manager ownership results**, not the entire public catalogs of every manager. A matching catalog name cannot take over an existing application. Optional authenticated discovery catalogs can suggest sources without transferring ownership; reviewed ownership transfer remains separate work.
 
 Every GUI launch checks readiness of the applicable enabled source tools before checking applications. Missing tools appear as **Unavailable**; launch does not install tools, refresh their indexes, or request administrator authorization. Readiness and source scans require recognized stable version output, with validated numeric versions stored separately from diagnostic text. The Homebrew 6 baseline includes [the scoped `--no-quit` upgrade option](https://github.com/Homebrew/brew/blob/6.0.0/Library/Homebrew/cmd/upgrade.rb). MacPorts 2.8.1 is the conservative [command-format baseline](https://github.com/macports/macports-base/blob/v2.8.1/src/port/port.tcl); mas 7 supplies identity/path-aware store checking. These minimums do not certify every operating-system and architecture combination. Unknown output and unsupported older versions require preparation or a manual tool update.
 
@@ -104,7 +104,7 @@ Requests reject redirects and use HTTPS, private ephemeral sessions, a 1 MiB res
 
 ## Source-mapping trust foundation
 
-The core defines versioned identity/channel/domain/capability evidence and authenticates supplied catalogs with client-pinned Ed25519 keys, revision/expiry checks and a retained known-good cache. Catalog evidence alone cannot authorize automatic installation. See [the wire format and trust boundary](docs/SOURCE-MAPPING-TRUST.md). No production publisher key or remote catalog endpoint is configured; broad discovery remains separate work.
+The core defines versioned identity/channel/domain/capability evidence and authenticates supplied catalogs with client-pinned Ed25519 keys, revision/expiry checks and a retained known-good cache. Catalog evidence alone cannot authorize automatic installation. See [the wire format and trust boundary](docs/SOURCE-MAPPING-TRUST.md). No default production publisher key or catalog endpoint is configured. **Sources → Configure Publisher** can pin a publisher you independently trust; **Refresh Discovery Catalog** fetches an authenticated, dated catalog. Ordinary scans use its unexpired cache and present identity/channel candidates in Details, without granting ownership, checked-release coverage or installation permission. See [discovery configuration and cache policy](docs/DISCOVERY-CATALOG.md).
 
 ## Update and cleanup behavior
 
@@ -215,4 +215,4 @@ CHANGELOG.md
 
 ## Next releases
 
-Current development version: **0.1.2**. Next priorities: cross-catalog discovery with verified identity mappings, Nix profile-aware routing, pkgsrc/pkgin, broader real-device validation, and reviewed source adoption. Sparkle and vendor endpoints can further cover apps not owned by a package manager. See the product specification for the broader roadmap.
+Current development version: **0.1.2**. Next priorities: production reviewed catalogs, source-specific release checks, Nix profile-aware routing, pkgsrc/pkgin, broader real-device validation, and reviewed source adoption. Sparkle and vendor endpoints can further cover apps not owned by a package manager. See the product specification for the broader roadmap.

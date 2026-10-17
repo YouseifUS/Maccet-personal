@@ -71,3 +71,11 @@ enum CodeSignatureEvidence {
         UpdaterError("The application's code signature is invalid or its reviewed signing identity changed. Rescan and review the application before retrying. No cleanup was performed.")
     }
 }
+
+/// Only a currently valid certificate-signed bundle establishes a publisher team.
+public enum InstalledPublisherIdentity {
+    public static func teamIdentifier(at path: String) -> String? {
+        if case .signed(_, _, let team) = CodeSignatureEvidence.capture(at: path) { return team }
+        return nil
+    }
+}

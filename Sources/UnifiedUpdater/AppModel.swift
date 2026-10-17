@@ -32,6 +32,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var maintainingSources = false
     @Published private(set) var setupWasPrepared = false
     @Published var setupItems = DependencySetup.initialItems
+    @Published var includeMacPortsInPreparation = false
     private var startupStarted = false
     @Published var scanning = false
     @Published var preparing = false
@@ -113,6 +114,7 @@ final class AppModel: ObservableObject {
         guard !busy else { return }
         let previousItems = prepareTools && setupWasPrepared && setupNeedsAttention ? setupItems : nil
         let prefs = preferences
+        let includeMacPorts = includeMacPortsInPreparation
         maintainingSources = prepareTools; setupWasPrepared = prepareTools
         settingUp = true; setupItems = previousItems ?? DependencySetup.initialItems
         apps = []; selected = []; lastScan = nil
@@ -130,7 +132,7 @@ final class AppModel: ObservableObject {
             }
             let setup = DependencySetup(runner: runner, locate: setupLocate)
             if prepareTools {
-                setupItems = await setup.prepare(inventory: inventory, disabledSources: prefs.disabledSources, retrying: previousItems, progress: progress)
+                setupItems = await setup.prepare(inventory: inventory, disabledSources: prefs.disabledSources, includeMacPorts: includeMacPorts, retrying: previousItems, progress: progress)
             } else {
                 setupItems = await setup.checkReadiness(inventory: inventory, disabledSources: prefs.disabledSources, progress: progress)
             }

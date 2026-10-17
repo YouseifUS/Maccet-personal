@@ -12,7 +12,7 @@ public struct ScanService {
     public func scan(preferences: Preferences, onPartial: ((ScanResult) async -> Void)? = nil) async -> ScanResult {
         let inventory = await Task.detached { AppInventory().discover(roots: preferences.inventoryRoots, includeSystem: preferences.includeSystemApplications ?? true) }.value
         let updateInventory = inventory.apps.filter { $0.state != .systemManaged }
-        let applicableSources = inventory.applicableSources
+        let applicableSources = inventory.applicableSources(macPortsAvailable: sourcePaths[.macPorts] != nil)
         var result = ScanResult(apps: inventory.apps, sources: [], warnings: inventory.warnings)
         var routes: [String: [UpdateRoute]] = [:]
         await onPartial?(result)
@@ -21,7 +21,10 @@ public struct ScanService {
                 result.sources.append(SourceHealth(source: source, executable: sourcePaths[source], available: sourcePaths[source] != nil, message: "Disabled in Settings.", checkRequired: false)); continue
             }
             if !applicableSources.contains(source) {
-                result.sources.append(SourceHealth(source: source, executable: sourcePaths[source], available: sourcePaths[source] != nil, message: "Not needed for this inventory. No update check was performed.", checkRequired: false)); continue
+                let message = source == .macPorts && sourcePaths[source] == nil
+                    ? "Optional MacPorts is not installed. This source was not checked. Include MacPorts in Sources preparation if you use it."
+                    : "Not needed for this inventory. No update check was performed."
+                result.sources.append(SourceHealth(source: source, executable: sourcePaths[source], available: sourcePaths[source] != nil, message: message, checkRequired: false)); continue
             }
             guard let executable = sourcePaths[source] else {
                 result.sources.append(SourceHealth(source: source, message: "\(source.title) not installed. Open Sources and choose Prepare Sources.", checkRequired: true)); continue

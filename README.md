@@ -20,6 +20,8 @@ This release aggregates **installed-manager ownership results**, not the entire 
 
 Every GUI launch checks readiness of the applicable enabled source tools before checking applications. Missing tools appear as **Unavailable**; launch does not install tools, refresh their indexes, or request administrator authorization. Readiness and source scans require recognized stable version output, with validated numeric versions stored separately from diagnostic text. The Homebrew 6 baseline includes [the scoped `--no-quit` upgrade option](https://github.com/Homebrew/brew/blob/6.0.0/Library/Homebrew/cmd/upgrade.rb). MacPorts 2.8.1 is the conservative [command-format baseline](https://github.com/macports/macports-base/blob/v2.8.1/src/port/port.tcl); mas 7 supplies identity/path-aware store checking. These minimums do not certify every operating-system and architecture combination. Unknown output and unsupported older versions require preparation or a manual tool update.
 
+MacPorts is optional. Preparation uses an existing manager, known MacPorts ownership, an App Store helper that needs MacPorts maintenance, or the **Include optional MacPorts installation** choice in Sources. That choice applies to preparation in the current session and respects disabled sources and inventory relevance. A previous successful MacPorts preparation remains evidence for an explicit retry if its tool disappears. Unknown/direct-download inventories do not install a missing MacPorts manager automatically, and unclaimed applications remain **Not checked**.
+
 A working App Store helper is checked directly during launch; its package manager and Apple developer tools are required only when the chosen maintenance action needs them. Missing or broken helpers still require attention.
 
 Choose **Sources → Prepare Sources** to install missing tools and maintain required sources. Partial preparation failures offer **Retry Setup**, while available sources can still check apps. See [source readiness and preparation](docs/STARTUP_SETUP.md) for prerequisites, authorization, and platform limitations.
@@ -52,11 +54,13 @@ Installing a manager does not make it the owner of existing direct-download appl
 
 - macOS 13 or later is the deployment target. See [validation notes](docs/VALIDATION.md) for what was actually exercised.
 - Homebrew 6+ in `/opt/homebrew/bin/brew` or `/usr/local/bin/brew` for managed casks.
-- MacPorts 2.8.1+ at `/opt/local/bin/port` for MacPorts-managed apps.
+- Optional MacPorts 2.8.1+ at `/opt/local/bin/port` for MacPorts-managed apps.
 - `mas` 7+ under `/opt/homebrew/bin`, `/usr/local/bin`, or `/opt/local/bin` for identity-based store checks.
 - A suitable App Store account and any required macOS authorization for store updates.
 
 Readiness and source scans require recognized stable version output, with validated numeric versions stored separately from diagnostic text. The Homebrew 6 baseline includes [the scoped `--no-quit` upgrade option](https://github.com/Homebrew/brew/blob/6.0.0/Library/Homebrew/cmd/upgrade.rb). MacPorts 2.8.1 is the conservative [command-format baseline](https://github.com/macports/macports-base/blob/v2.8.1/src/port/port.tcl); mas 7 supplies identity/path-aware store checking. These minimums do not certify every operating-system and architecture combination. Unknown output and unsupported older versions require preparation or a manual tool update.
+
+MacPorts is optional. Preparation uses an existing manager, known MacPorts ownership, an App Store helper that needs MacPorts maintenance, or the **Include optional MacPorts installation** choice in Sources. That choice applies to preparation in the current session and respects disabled sources and inventory relevance. A previous successful MacPorts preparation remains evidence for an explicit retry if its tool disappears. Unknown/direct-download inventories do not install a missing MacPorts manager automatically, and unclaimed applications remain **Not checked**.
 
 A working App Store helper is checked directly during launch; its package manager and Apple developer tools are required only when the chosen maintenance action needs them. Missing or broken helpers still require attention.
 

@@ -11,9 +11,14 @@ private final class SetupRunner: CommandRunning {
     var masVersion = "7.0.0"
     var actions: [String] = []
     var calls = 0
+    var macPortsInstallerRequests = 0
     var beforeSetup: (@MainActor () throws -> Void)?
     func run(_ executable: String, _ arguments: [String], environment: [String: String], timeout: TimeInterval?) async throws -> CommandResult {
         calls += 1
+        if executable == "/usr/bin/curl", arguments.last?.contains("macports/macports-base") == true {
+            macPortsInstallerRequests += 1
+            return CommandResult(status: 1, errorOutput: "Controlled optional installer unavailable")
+        }
         if executable == "/usr/bin/xcode-select", arguments == ["--print-path"] { return CommandResult(status: toolsMissing ? 1 : 0, output: "/Developer") }
         if executable == "/usr/bin/xcrun" { try await beforeSetup?(); return CommandResult(status: toolsMissing ? 1 : 0, output: "/usr/bin/clang") }
         if executable == "/bin/bash", arguments.count > 1 {
@@ -82,7 +87,7 @@ private final class SetupRunner: CommandRunning {
             let missing = AppModel(runner: missingRunner, setupLocate: { _ in nil })
             missing.preferences.scanRoots = [applications.path]; missing.preferences.includeSystemApplications = false
             missing.start(); try await wait(missing)
-            try expect(missing.setupItems.allSatisfy { $0.phase == .unavailable } && missing.setupNeedsAttention, "Missing launch tools were not reported as unavailable")
+            try expect([0, 1, 3].allSatisfy { missing.setupItems[$0].phase == .unavailable } && missing.setupItems[2].phase == .notRequired && missing.setupNeedsAttention, "Missing launch tools were not reported as unavailable")
             try expect(missingRunner.actions.isEmpty && missing.lastScan != nil && missing.apps.count == 2 && missing.error == nil, "Missing tools started installation or prevented inventory and scanning")
             print("PASS Missing launch tools preserve inventory and require explicit preparation")
             let missingApple = AppModel(runner: missingRunner, setupLocate: { paths[$0] })
@@ -139,6 +144,19 @@ private final class SetupRunner: CommandRunning {
             try expect(empty.setupItems.allSatisfy { $0.phase == .notRequired } && empty.lastScan != nil, "An empty inventory did not finish without setup")
             try expect(empty.sources.allSatisfy { $0.checkRequired == false } && !empty.sourceChecksNeedAttention, "An unnecessary source appeared as missing or failed")
             print("PASS Empty inventories do not trigger source preparation")
+            let optionalRunner = SetupRunner()
+            let optional = AppModel(runner: optionalRunner, sourcePaths: [:], setupLocate: { $0 == "port" ? nil : paths[$0] })
+            optional.preferences.scanRoots = [applications.appendingPathComponent("Direct.app").path]
+            optional.preferences.includeSystemApplications = false
+            optional.prepareSources(); try await wait(optional)
+            try expect(optional.setupItems[2].phase == .notRequired && optionalRunner.macPortsInstallerRequests == 0, "Default preparation requested an unrelated MacPorts installer")
+            optional.includeMacPortsInPreparation = true
+            optional.prepareSources(); try await wait(optional)
+            try expect(optional.setupItems[2].phase == .failed && optionalRunner.macPortsInstallerRequests == 1, "Sources opt-in was not forwarded to preparation")
+            optional.includeMacPortsInPreparation = false
+            optional.prepareSources(); try await wait(optional)
+            try expect(optional.setupItems[2].phase == .notRequired && optionalRunner.macPortsInstallerRequests == 1, "Removing optional opt-in kept retrying its installer")
+            print("PASS Optional MacPorts preparation requires the Sources opt-in")
             let storeOnly = session()
             storeOnly.preferences.scanRoots = [applications.appendingPathComponent("Store.app").path]
             let beforeStore = runner.actions.count
@@ -171,7 +189,7 @@ private final class SetupRunner: CommandRunning {
             try expect(!changedHelper.setupNeedsAttention && changedHelper.setupItems[3].version == "7.1.0", "GUI retained stale readiness after helper recovery")
             try expect(Array(runner.actions.dropFirst(beforeRecovery)) == ["mas-update"] && changedHelper.lastScan != nil, "Helper recovery repeated successful manager maintenance")
             print("PASS GUI helper recovery clears attention without repeating healthy managers")
-            print("\n15 setup orchestration checks passed; 0 failed.")
+            print("\n16 setup orchestration checks passed; 0 failed.")
         } catch {
             FileHandle.standardError.write(Data("FAIL \(error)\n".utf8)); exit(1)
         }

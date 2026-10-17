@@ -716,7 +716,8 @@ private enum Checks {
             var prefs = Preferences(); prefs.scanRoots = [fixture.root.appendingPathComponent("Missing").path]; prefs.includeSystemApplications = false
             let result = await ScanService(runner: runner, sourcePaths: [.appStore: "/usr/bin/true"]).scan(preferences: prefs)
             try expect(!result.warnings.isEmpty && runner.calls.count == 1)
-            try expect(result.sources.allSatisfy { $0.checkRequired == true && $0.needsAttention })
+            try expect(result.sources.filter { $0.source != .macPorts }.allSatisfy { $0.checkRequired == true && $0.needsAttention })
+            try expect(result.sources.first { $0.source == .macPorts }?.checkRequired == false)
         }
         await check("Old source reports decode conservatively and skipped status round-trips") {
             let data = Data(#"{"source":"macPorts","version":"","available":false,"message":"Not installed"}"#.utf8)
@@ -860,7 +861,7 @@ private enum Checks {
         await check("All missing tools remain unavailable without downloading or launching installers") {
             let fixture = SetupFixture(); fixture.paths = [:]; fixture.toolsMissing = true
             let result = await fixture.service().checkReadiness()
-            try expect(result.allSatisfy { $0.phase == .unavailable && $0.phase.needsAttention })
+            try expect([0, 1, 3].allSatisfy { result[$0].phase == .unavailable && result[$0].phase.needsAttention } && result[2].phase == .notRequired)
             try expect(fixture.runner.calls.count == 1 && fixture.runner.calls[0].executable == "/usr/bin/xcode-select" && fixture.runner.calls[0].args == ["--print-path"])
         }
         await check("Readiness still reports working source tools when Apple tools are unavailable") {
@@ -1051,9 +1052,50 @@ private enum Checks {
             let result = await setup.service().prepare(inventory: AppInventory().discover(roots: [fixture.root.path]))
             try expect(result[0].phase == .failed && result[1].phase == .failed && result[2].phase == .failed && result[3].phase == .notRequired)
         }
-        await check("Startup installs missing managers from verified official packages and then mas") {
+        await check("Unknown, direct and Homebrew inventories do not install unrelated optional MacPorts") {
+            for kind in ["unknown", "direct", "homebrew", "ports-owned"] {
+                let fixture = try Fixture(); defer { fixture.clean() }
+                var inventory = AppInventory().discover(roots: [fixture.root.path])
+                if kind == "unknown" { inventory.warnings = ["Incomplete inventory"] }
+                if kind == "homebrew" { inventory.apps[0].source = .homebrew }
+                if kind == "ports-owned" { inventory.apps[0].source = .macPorts }
+                let setup = SetupFixture(); setup.paths.removeValue(forKey: "port")
+                let result = await setup.service().prepare(inventory: inventory)
+                let installed = setup.actions.contains("ports-update")
+                try expect(installed == (kind == "ports-owned"), "Unrelated MacPorts preparation for " + kind)
+                try expect(result[2].phase == (kind == "ports-owned" ? .ready : .notRequired))
+            }
+        }
+        await check("MacPorts opt-in requires an applicable enabled source and preserves explicit installation") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let inventory = AppInventory().discover(roots: [fixture.root.path])
+            let setup = SetupFixture(); setup.paths.removeValue(forKey: "port")
+            let prepared = await setup.service().prepare(inventory: inventory, includeMacPorts: true)
+            try expect(prepared[2].phase == .ready && setup.actions.contains("ports-update"))
+            for empty in [false, true] {
+                let ignored = SetupFixture(); ignored.paths.removeValue(forKey: "port")
+                let result = await ignored.service().prepare(inventory: empty ? AppInventory().discover(roots: []) : inventory, disabledSources: empty ? [] : [.macPorts], includeMacPorts: true)
+                try expect(result[2].phase == (empty ? .notRequired : .disabled) && !ignored.actions.contains("ports-update"))
+            }
+        }
+        await check("Missing optional MacPorts does not create false readiness or update coverage") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let setup = SetupFixture(); setup.paths.removeValue(forKey: "port")
+            let readiness = await setup.service().checkReadiness(inventory: AppInventory().discover(roots: [fixture.root.path]))
+            try expect(readiness[2].phase == .notRequired && !readiness[2].phase.needsAttention)
+            let runner = FakeRunner { call in
+                if call.args == ["--version"] { return CommandResult(output: "Homebrew 7.0.9") }
+                return CommandResult(output: #"{"casks":[]}"#)
+            }
+            var prefs = Preferences(); prefs.scanRoots = [fixture.root.path]; prefs.includeSystemApplications = false
+            let result = await ScanService(runner: runner, sourcePaths: [.homebrew: "/usr/bin/true"]).scan(preferences: prefs)
+            let ports = result.sources.first { $0.source == .macPorts }!
+            try expect(!ports.needsAttention && ports.checkRequired == false && !ports.available)
+            try expect(result.checkedCount == 0 && result.apps[0].state == .unchecked)
+        }
+        await check("Explicit optional preparation installs missing managers from verified official packages and then mas") {
             let fixture = SetupFixture(); fixture.paths = [:]; fixture.ownedMas = false
-            let result = await fixture.service().prepare()
+            let result = await fixture.service().prepare(includeMacPorts: true)
             try expect(result.allSatisfy { $0.phase == .ready })
             try expect(fixture.actions == ["install-package", "brew-update", "install-package", "ports-update", "mas-install"])
             let installers = fixture.runner.calls.filter { $0.executable == "/bin/bash" && $0.args[1] == "install-package" }
@@ -1206,18 +1248,18 @@ private enum Checks {
         }
         await check("A mismatched package checksum blocks installation") {
             let fixture = SetupFixture(); fixture.paths.removeValue(forKey: "port"); fixture.badDigest = true
-            let result = await fixture.service().prepare()
+            let result = await fixture.service().prepare(includeMacPorts: true)
             try expect(result[2].phase == .failed && result[2].message.contains("checksum"))
             try expect(!fixture.actions.contains("install-package"))
         }
         await check("Gatekeeper rejection blocks package installation") {
             let fixture = SetupFixture(); fixture.paths.removeValue(forKey: "port"); fixture.rejectSignature = true
-            let result = await fixture.service().prepare()
+            let result = await fixture.service().prepare(includeMacPorts: true)
             try expect(result[2].phase == .failed && !fixture.actions.contains("install-package"))
         }
         await check("Canceled installation is not reported ready and other sources finish") {
             let fixture = SetupFixture(); fixture.paths.removeValue(forKey: "port"); fixture.cancelInstall = true
-            let result = await fixture.service().prepare()
+            let result = await fixture.service().prepare(includeMacPorts: true)
             try expect(result[2].phase == .failed && result[3].phase == .ready)
             try expect(!fixture.actions.contains("ports-update"))
         }

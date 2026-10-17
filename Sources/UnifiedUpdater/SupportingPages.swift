@@ -65,6 +65,13 @@ struct SourcesPage: View {
                             Spacer()
                             Button(model.setupActionTitle, action: model.prepareSources).disabled(model.busy)
                         }
+                        if model.sources.first(where: { $0.source == .macPorts })?.available != true {
+                            Toggle("Include optional MacPorts installation", isOn: $model.includeMacPortsInPreparation)
+                                .toggleStyle(.checkbox).font(.system(size: 12))
+                                .disabled(model.busy || model.preferences.disabledSources.contains(.macPorts))
+                            Text("Choose this if you use MacPorts, then prepare sources. Other applications do not require installing this manager.")
+                                .font(.system(size: 12)).foregroundStyle(Maccet.secondary)
+                        }
                         DisclosureGroup("Readiness and preparation results", isExpanded: $showSteps) { SetupSteps() }
                     }
                 }
@@ -99,7 +106,7 @@ private struct SourceCard: View {
                     }
                     Spacer()
                     if !disabled && source.checkRequired != false { StatusPill(title: source.available ? "Tool available" : "Tool missing", tone: source.available ? .success : .attention) }
-                    StatusPill(title: disabled ? "Checks disabled" : source.checkRequired == false ? "Not needed" : source.error != nil ? "Check failed" : "Checks enabled", tone: disabled || source.checkRequired == false ? .neutral : source.error != nil ? .failure : .neutral)
+                    StatusPill(title: disabled ? "Checks disabled" : source.checkRequired == false ? (source.source == .macPorts && !source.available ? "Optional" : "Not needed") : source.error != nil ? "Check failed" : "Checks enabled", tone: disabled || source.checkRequired == false ? .neutral : source.error != nil ? .failure : .neutral)
                 }
                 Text(disabled ? "Application checks are disabled for this source." : source.message).font(.system(size: 13)).foregroundStyle(Maccet.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 if let setup, setup.phase == .failed {

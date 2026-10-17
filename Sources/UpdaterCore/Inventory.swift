@@ -12,6 +12,17 @@ public struct InventoryResult {
         if thirdParty.contains(where: { !$0.hasStoreReceipt }) { sources.formUnion([.homebrew, .macPorts]) }
         return sources
     }
+    /// Candidate sources and installation policy are distinct: absence of a
+    /// store receipt alone does not authorize installing an optional manager.
+    public func applicableSources(macPortsAvailable: Bool, includeMacPorts: Bool = false) -> Set<UpdateSource> {
+        var sources = applicableSources
+        let owned = apps.contains { app in
+            app.state != .systemManaged && !app.hasStoreReceipt
+                && (app.source == .macPorts || app.routes?.contains { $0.source == .macPorts } == true)
+        }
+        if !macPortsAvailable && !includeMacPorts && !owned { sources.remove(.macPorts) }
+        return sources
+    }
 }
 
 public struct AppInventory {

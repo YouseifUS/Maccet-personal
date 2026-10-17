@@ -75,13 +75,13 @@ public struct DependencySetup {
     private func versionMessage(tool: String, version: String) -> String {
         (tool == "brew" ? "Homebrew " : tool == "port" ? "MacPorts " : "mas ") + version
     }
-    public func prepare(inventory: InventoryResult? = nil, disabledSources: Set<UpdateSource> = [], retrying previousItems: [SetupItem]? = nil, progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
-        await run(inventory: inventory, disabledSources: disabledSources, retrying: previousItems, prepareTools: true, progress: progress)
+    public func prepare(inventory: InventoryResult? = nil, disabledSources: Set<UpdateSource> = [], includeMacPorts: Bool = false, retrying previousItems: [SetupItem]? = nil, progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
+        await run(inventory: inventory, disabledSources: disabledSources, retrying: previousItems, prepareTools: true, includeMacPorts: includeMacPorts, progress: progress)
     }
     public func checkReadiness(inventory: InventoryResult? = nil, disabledSources: Set<UpdateSource> = [], progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
-        await run(inventory: inventory, disabledSources: disabledSources, retrying: nil, prepareTools: false, progress: progress)
+        await run(inventory: inventory, disabledSources: disabledSources, retrying: nil, prepareTools: false, includeMacPorts: false, progress: progress)
     }
-    private func run(inventory: InventoryResult?, disabledSources: Set<UpdateSource>, retrying previousItems: [SetupItem]?, prepareTools: Bool, progress: @escaping ([SetupItem]) async -> Void) async -> [SetupItem] {
+    private func run(inventory: InventoryResult?, disabledSources: Set<UpdateSource>, retrying previousItems: [SetupItem]?, prepareTools: Bool, includeMacPorts: Bool, progress: @escaping ([SetupItem]) async -> Void) async -> [SetupItem] {
         // Reuse successful preparation only for an explicit retry in this session.
         var items = Self.initialItems.map { initial in
             guard let ready = previousItems?.first(where: { $0.id == initial.id && $0.phase == .ready }) else { return initial }
@@ -107,13 +107,17 @@ public struct DependencySetup {
             items[index].version = Diagnostics.redact(version)
             await report(index, .ready, versionMessage(tool: items[index].id, version: version))
         }
-        // Missing metadata cannot prove a source unnecessary. Preserve the
-        // conservative enabled-source behavior for incomplete or absent inventory.
-        let applicableSources = inventory?.applicableSources ?? Set(UpdateSource.allCases)
+        // Incomplete inventories keep candidate checks conservative. An absent
+        // optional manager still needs ownership evidence or explicit opt-in.
+        let requirements = inventory ?? InventoryResult(apps: [], warnings: ["Inventory is incomplete"])
+        let previouslyPreparedPorts = previousItems?.contains { $0.id == "port" && $0.phase == .ready && $0.executablePath != nil } == true
+        let applicableSources = requirements.applicableSources(macPortsAvailable: locate("port") != nil, includeMacPorts: includeMacPorts || previouslyPreparedPorts)
         let requestedSources = applicableSources.subtracting(disabledSources)
         func skip(_ index: Int, _ source: UpdateSource) async {
             if disabledSources.contains(source) { await report(index, .disabled, "\(source.title) is disabled in Settings.") }
-            else { await report(index, .notRequired, "No discovered application requires this source.") }
+            else if source == .macPorts && locate("port") == nil {
+                await report(index, .notRequired, "MacPorts is optional and not installed. Include it in Sources preparation if you use it.")
+            } else { await report(index, .notRequired, "No discovered application requires this source.") }
         }
         let needsMas = requestedSources.contains(.appStore)
         let masUsesPorts = needsMas && locate("mas") == "/opt/local/bin/mas"

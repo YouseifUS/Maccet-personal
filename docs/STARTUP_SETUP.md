@@ -2,9 +2,19 @@
 
 The GUI reads the configured application inventory, checks readiness of applicable enabled source tools, and scans available sources once per app process. Opening another window does not repeat this sequence. Startup does not install tools, refresh indexes, upgrade helpers, download packages, or request authorization. **Sources → Prepare Sources** explicitly starts installation and maintenance. After partial preparation failure, **Retry Setup** retries unfinished preparation in the current session.
 
+## Independently scoped metadata requests
+
+**Sources → Refresh Metadata** uses `SourceMetadataRefresh` and separate per-source results/last-attempt time. It does not reuse or overwrite tool-preparation evidence and does not turn a metadata failure into a previous setup retry. Metadata failures remain visible in source attention; a later request can clear them. The following app scan is serialized with the request, and existing update selections/reviews are cleared first.
+
+- Homebrew: use the same Maccet cache as ordinary scans and run `outdated --cask --greedy --json=v2` with `HOMEBREW_NO_AUTO_UPDATE=1`, `HOMEBREW_FORCE_API_AUTO_UPDATE=1`, `HOMEBREW_API_AUTO_UPDATE_SECS=0` and a cleared `HOMEBREW_API_UPDATED`. Homebrew classifies `outdated` as an API auto-update command, while its Git/tool auto-update returns early under NO_AUTO_UPDATE. API-disabled Git-tap mode fails this narrow request; it never falls back to `brew update`. A completed cask check can still use verified cached data if the upstream API is unavailable, so the UI labels completion/attempt time rather than guaranteed freshness.
+- MacPorts: the bundled `ports-sync` action requests only `/opt/local/bin/port -N sync` through normal macOS authorization. The [official sync manual](https://man.macports.org/port-sync.1.html) distinguishes port definitions from the base update performed by [selfupdate](https://man.macports.org/port-selfupdate.1.html). Base/tool updates remain explicit preparation.
+- App Store: there is no local package index to maintain. The following ordinary application scan performs its live check.
+
+Missing tools do not trigger installation, developer-tool requests, helper upgrades or a different maintenance intent. Disabled sources, inventory relevance and the optional-MacPorts policy still apply. Independent sources can complete after another request fails. Source versions and canonical destinations are validated before the metadata command. Homebrew API behavior was checked against the official 6.0.0 and installed 7.0.9 implementation; this does not close the live/clean-machine acceptance gates.
+
 ## Read-only readiness
 
-`DependencySetup.checkReadiness` shares applicability, dependency rules, version probes, and canonical path recording with explicit preparation. It only runs `xcode-select --print-path` and required tools' version commands, each with a 20-second timeout. The Apple-tools result describes whether a developer directory is selected; explicit preparation checks `clang` before maintenance. Launch avoids invoking developer-tool shims that may request installation. Missing tools show **Unavailable**, failed or incompatible version probes show **Failed**, and successful source tools expose their canonical path and reported version. Apple tools being unavailable does not hide working source tools. Disabled and unnecessary tools receive no commands. Readiness success does not claim the source index is fresh or reuse a previous maintenance result.
+`DependencySetup.checkReadiness` shares applicability policy, validated version probes, and canonical path recording with explicit preparation. Existing mas readiness does not add dependencies of a future maintenance action. It only runs `xcode-select --print-path` and required tools' version commands, each with a 20-second timeout. The Apple-tools result describes whether a developer directory is selected; explicit preparation checks `clang` before maintenance. Launch avoids invoking developer-tool shims that may request installation. Missing tools show **Unavailable**, failed or incompatible version probes show **Failed**, and successful source tools expose their canonical path and reported version. Apple tools being unavailable does not hide working source tools. Disabled and unnecessary tools receive no commands. Readiness success does not claim the source index is fresh or reuse a previous maintenance result.
 
 The following application scan can contact source services and use the local MacPorts index. Inventory and working sources remain usable when other tools are unavailable. Choose **Prepare Sources** for installation, index refresh, and helper maintenance. The UI distinguishes this operation from readiness; quit protection applies during maintenance and application updates, while readiness checks can be closed normally.
 
@@ -26,9 +36,7 @@ inventories prepare only the helper's package-manager route, and inventories
 without store-receipt applications skip mas. Package managers remain potential
 routes: this filtering does not prove ownership of a non-store application.
 
-Any inventory warning, or an API caller omitting inventory, keeps conservative
-enabled-source preparation because missing metadata cannot prove a source
-unnecessary. Warnings remain visible. Every preparation attempt, including
+Any inventory warning, or an API caller omitting inventory, keeps candidate checks conservative. Installing an absent optional MacPorts manager additionally needs ownership/dependency evidence, previous successful explicit preparation on retry, or the current-session Sources opt-in. Warnings remain visible. Every preparation attempt, including
 retry, recomputes these needs; previously successful steps are reused only
 when still applicable. The later source check remains a separate operation
 and uses the same inventory-applicability rules.

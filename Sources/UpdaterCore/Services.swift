@@ -85,7 +85,10 @@ public struct UpdateEngine {
             } else {
                 preview = "Update \(app.name) through App Store to \(app.targetVersion ?? ""). macOS will ask for administrator authorization. Save your work and close the app before continuing."
             }
-            plans.append(PlannedUpdate(app: app, preview: Diagnostics.redact(preview)))
+            var plan = PlannedUpdate(app: app, preview: Diagnostics.redact(preview))
+            try plan.reviewedSignature.validate(at: app.path)
+            plan.preview += "\n\n" + plan.reviewedSignature.reviewSummary
+            plans.append(plan)
         }
         guard !plans.isEmpty else { throw UpdaterError("There are no eligible updates in this selection.") }
         return plans
@@ -122,6 +125,7 @@ public struct UpdateEngine {
         var ownedCache: OwnedUpdateCache?
         do {
             try await onStage(.preflight, record.message)
+            try plan.reviewedSignature.validate(at: app.path)
             _ = try await revalidate(app)
             guard !(await Self.isRunning(app)) else {
                 record.state = .deferred; record.message = "The app is still running. Close it and review a new update plan."; return record
@@ -137,13 +141,16 @@ public struct UpdateEngine {
                     record.state = .deferred; record.message = "The app started during preflight. Close it and review a new plan."; return record
                 }
                 try await onStage(.installing, "Installing the reviewed release through Homebrew.")
+                try plan.reviewedSignature.validate(at: app.path)
                 try await HomebrewAdapter(executable: app.routeExecutable!, runner: runner, cacheRoot: cache.folder, freezeMetadata: true).upgrade(app)
             }
             else if app.source == .macPorts {
                 try await onStage(.installing, "Installing the reviewed release through MacPorts.")
+                try plan.reviewedSignature.validate(at: app.path)
                 try await MacPortsAdapter(executable: app.routeExecutable!, runner: runner).upgrade(app)
             } else {
                 try await onStage(.installing, "Installing the reviewed release through App Store.")
+                try plan.reviewedSignature.validate(at: app.path)
                 try await AppStoreAdapter(executable: app.routeExecutable!, runner: runner).upgrade(app)
             }
             try await onStage(.verifying, "Reading the installed application again.")
@@ -152,6 +159,7 @@ public struct UpdateEngine {
             for attempt in 0..<4 {
                 if attempt > 0 { try await Task.sleep(nanoseconds: 1_000_000_000) }
                 if let installed = try? AppInventory().read(app.path), Self.verify(before: app, after: installed) {
+                    try plan.reviewedSignature.validate(at: app.path)
                     verified = true; break
                 }
             }
@@ -176,6 +184,7 @@ public struct UpdateEngine {
         }
         return record
     }
+    // Metadata comparison only; execute also validates the reviewed code signature.
     public static func verify(before: AppRecord, after: AppRecord) -> Bool {
         guard before.bundleID == after.bundleID, before.path == after.path, before.hasStoreReceipt == after.hasStoreReceipt,
               before.version != after.version || before.build != after.build, let target = before.targetVersion else { return false }

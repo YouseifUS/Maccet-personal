@@ -188,7 +188,11 @@ public struct PlannedUpdate: Identifiable {
     public var id: String { app.id }
     public var app: AppRecord
     public var preview: String
-    public init(app: AppRecord, preview: String) { self.app = app; self.preview = preview }
+    let reviewedSignature: CodeSignatureEvidence
+    public init(app: AppRecord, preview: String) {
+        self.app = app; self.preview = preview
+        reviewedSignature = CodeSignatureEvidence.capture(at: app.path)
+    }
 }
 
 public struct UpdaterError: LocalizedError, Equatable {

@@ -88,6 +88,8 @@ Homebrew updates are scoped to a named cask with `--no-quit` and `--skip-cask-de
 
 The first alpha supports automatic updates for simple, specifically versioned app casks whose target metadata can be verified. Pinned, disabled, complex installer, non-numeric vendor-version, and ambiguous cases require manual attention. Apps installed outside Homebrew are not silently adopted, even if they appear in its catalog.
 
+Update review captures code-signature evidence. Signed applications must pass strict resource, nested-code and architecture validation before installation and after the target metadata matches. Certificate-signed replacements must satisfy the reviewed designated requirement, signing identifier and team identity. Ad-hoc signatures establish integrity and a signing identifier, without certifying a publisher. Applications already unsigned at review remain supported without a publisher-authenticity claim; a newly signed replacement must validate. Invalid signatures or changed reviewed signing identities prevent success and retain the attempt's artifacts. These are point-in-time checks, not a guarantee against concurrent external changes or a substitute for Gatekeeper/notarization.
+
 App Store operations use a fixed `mas` executable and validated numeric store ID. The app does not collect or store your Apple Account or administrator password. If a store operation fails, open App Store from the app row and resolve the issue there.
 
 For Homebrew, each update attempt gets a separate cache folder under this app's local data directory. After the reviewed target is verified, only that attempt's cache is eligible for automatic removal. Failed or unverified attempts retain their artifacts. Disabling cleanup retains successful-attempt files too.

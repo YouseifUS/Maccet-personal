@@ -40,6 +40,25 @@ private struct Fixture {
         let json: [String: Any] = ["casks": [["token": "example", "version": target, "installed": "1.0", "artifacts": [["app": ["Example.app"], "target": appURL.path]], "auto_updates": true]]]
         return String(decoding: try JSONSerialization.data(withJSONObject: json), as: UTF8.self)
     }
+    func sign(identifier: String? = nil) throws {
+        let fm = FileManager.default
+        let contents = appURL.appendingPathComponent("Contents")
+        let executable = contents.appendingPathComponent("MacOS/Example")
+        try fm.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !fm.fileExists(atPath: executable.path) { try fm.copyItem(atPath: "/usr/bin/true", toPath: executable.path) }
+        let infoURL = contents.appendingPathComponent("Info.plist")
+        var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: infoURL), format: nil) as! [String: Any]
+        info["CFBundleExecutable"] = "Example"; info["CFBundlePackageType"] = "APPL"
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: infoURL)
+        let resource = contents.appendingPathComponent("Resources/Sealed.txt")
+        try fm.createDirectory(at: resource.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !fm.fileExists(atPath: resource.path) { try Data("reviewed resource".utf8).write(to: resource) }
+        let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        process.arguments = ["--force", "--sign", "-", "--identifier", identifier ?? (info["CFBundleIdentifier"] as! String), appURL.path]
+        process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+        try process.run(); process.waitUntilExit()
+        try expect(process.terminationStatus == 0, "Could not sign disposable fixture")
+    }
     func candidate() throws -> AppRecord {
         HomebrewAdapter.apply(casks: try HomebrewAdapter.parseCasks(brewJSON()), outdated: ["example"], to: [try app()], executable: "/usr/bin/true")[0]
     }
@@ -306,6 +325,58 @@ private enum Checks {
             after.build = "20"; try expect(UpdateEngine.verify(before: before, after: after))
             before.targetVersion = "2.0"; before.targetBuild = "21"
             try expect(!UpdateEngine.verify(before: before, after: after))
+        }
+        await check("Signature verification rejects tampered, stripped and differently identified replacements") {
+            for change in ["tampered", "stripped", "identity"] {
+                let fixture = try Fixture(); defer { fixture.clean() }
+                try fixture.sign()
+                let plan = PlannedUpdate(app: try fixture.candidate(), preview: "Signed fixture")
+                let runner = try fixture.runner {
+                    try fixture.write(version: "2.0", build: "20")
+                    try fixture.sign(identifier: change == "identity" ? "different.signing.identity" : nil)
+                    if change == "tampered" { try Data("changed resource".utf8).write(to: fixture.appURL.appendingPathComponent("Contents/Resources/Sealed.txt")) }
+                    if change == "stripped" { try FileManager.default.removeItem(at: fixture.appURL.appendingPathComponent("Contents/_CodeSignature")) }
+                }
+                let cache = fixture.root.appendingPathComponent("Cache")
+                let engine = UpdateEngine(runner: runner, cacheRoot: cache, sourcePaths: [.homebrew: "/usr/bin/true"])
+                let result = await engine.execute(plan, cleanup: true) { _, _ in }
+                try expect(result.state == .failed && result.message.contains("signature"), "Invalid replacement recorded as success: " + change)
+                try expect(try FileManager.default.contentsOfDirectory(atPath: cache.appendingPathComponent("Operations").path).count == 1)
+            }
+        }
+        await check("Signature remnants cannot disguise a broken signed bundle as unsigned") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            try fixture.sign()
+            // Removing executable metadata must not turn a broken sealed bundle
+            // into the explicitly supported unsigned-app policy.
+            try fixture.write(version: "1.0", build: "10")
+            let runner = try fixture.runner()
+            let engine = UpdateEngine(runner: runner, sourcePaths: [.homebrew: "/usr/bin/true"])
+            let result = await engine.execute(PlannedUpdate(app: try fixture.candidate(), preview: ""), cleanup: false) { _, _ in }
+            try expect(result.state == .failed && result.message.contains("signature") && runner.calls.isEmpty)
+        }
+        await check("A valid signed release with the same identity verifies and cleans its attempt") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            try fixture.sign()
+            let runner = try fixture.runner { try fixture.write(version: "2.0", build: "20"); try fixture.sign() }
+            let cache = fixture.root.appendingPathComponent("Cache")
+            let engine = UpdateEngine(runner: runner, cacheRoot: cache, sourcePaths: [.homebrew: "/usr/bin/true"])
+            let plans = try await engine.prepare([try fixture.candidate()], preferences: Preferences())
+            let result = await engine.execute(plans[0], cleanup: true) { _, _ in }
+            try expect(result.state == .succeeded, result.message)
+            try expect(try FileManager.default.contentsOfDirectory(atPath: cache.appendingPathComponent("Operations").path).isEmpty)
+        }
+        await check("A signed bundle changed after review is rejected before source commands") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            try fixture.sign()
+            let plan = PlannedUpdate(app: try fixture.candidate(), preview: "")
+            try Data("changed resource".utf8).write(to: fixture.appURL.appendingPathComponent("Contents/Resources/Sealed.txt"))
+            let runner = try fixture.runner()
+            let engine = UpdateEngine(runner: runner, sourcePaths: [.homebrew: "/usr/bin/true"])
+            let result = await engine.execute(plan, cleanup: true) { _, _ in }
+            try expect(result.state == .failed && result.message.contains("signature") && runner.calls.isEmpty)
+            do { _ = try await engine.prepare([try fixture.candidate()], preferences: Preferences()); throw CheckFailure(description: "Invalid signature allowed review") }
+            catch is UpdaterError { }
         }
         await check("Reviewed updates execute only the named cask and clean only after verification") {
             let fixture = try Fixture(); defer { fixture.clean() }

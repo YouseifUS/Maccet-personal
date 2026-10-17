@@ -59,7 +59,7 @@ public struct MacPortsAdapter {
                 let target = String(release.target.split(separator: "_").first ?? "")
                 app.targetVersion = target; app.state = .manual; app.automatic = false
                 app.targetPackageVersion = release.target
-                app.detail = "MacPorts reports \(release.installed) → \(release.target). Uses the local ports index; retry source setup to refresh it if it is stale."
+                app.detail = "MacPorts reports \(release.installed) → \(release.target). Uses the local ports index; open Sources and prepare sources to refresh it if it is stale."
                 if ReleaseComparison.compare(app.version, target) == .orderedAscending {
                     app.state = .updateAvailable; app.automatic = true
                 } else if ReleaseComparison.compare(app.version, target) == .orderedDescending {
@@ -68,7 +68,7 @@ public struct MacPortsAdapter {
                     app.detail += " A revision, variant, or non-numeric release requires manual verification."
                 }
             } else {
-                app.state = .current; app.detail = "No update reported by MacPorts' local index. Launch setup refreshes this index; retry source setup if needed."
+                app.state = .current; app.detail = "No update reported by MacPorts' local index. Open Sources and prepare sources to refresh the index if it is stale."
             }
             result[index] = app
         }

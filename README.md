@@ -151,7 +151,7 @@ Default storage: `~/Library/Application Support/UnifiedUpdater/`.
 
 Explicit source preparation contacts GitHub, Homebrew, MacPorts, and Apple services to obtain and verify dependencies. Application checks contact source services. There is no analytics service or separate inventory-upload backend. Reports are exported only to a location you choose. Diagnostic strings redact home paths and common credential-bearing URL values; review any report before sharing it.
 
-Subprocess output is captured in a private directory (0700) with owner-only stdout/stderr files (0600), created before the command starts. These temporary captures are removed when the runner finishes. File permissions protect raw output while it awaits diagnostic redaction.
+Subprocess stdout and stderr are drained independently through anonymous pipes. Only the first 16 MiB of each stream are retained in memory; raw process captures are not written to disk. Excess output is drained and discarded while the command continues. After it exits, an oversized result is rejected with its exit status and a sanitized diagnostic prefix, rather than parsed as complete. Output volume does not terminate an installer. Inherited output descriptors do not delay the owned command or retain its captured buffers after completion.
 
 If the app closes during an operation, active history entries become **Interrupted** on next launch. No operation is automatically retried and no artifacts are automatically deleted during recovery. Rescan first to inspect the installed state.
 

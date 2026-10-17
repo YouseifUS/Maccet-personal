@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 @_spi(Testing) import UpdaterCore
 
 private struct CheckFailure: Error, CustomStringConvertible { var description: String }
@@ -148,6 +149,29 @@ private final class SetupFixture {
     var actions: [String] { runner.calls.filter { $0.executable == "/bin/bash" }.map { $0.args[1] } }
 }
 
+private func catalogFixture(_ app: AppRecord, now: Date, revision: UInt64 = 2) -> SourceMappingCatalog {
+    let mapping = SourceMapping(id: "example", source: .homebrew, packageID: "example", bundleID: app.bundleID,
+        signingTeamIdentifier: "TEAMID1234", channel: "stable", officialHosts: ["updates.example.com"],
+        metadataURL: URL(string: "https://updates.example.com/feed.xml"), reviewedAt: now.addingTimeInterval(-60), capability: .managerUpdate)
+    return SourceMappingCatalog(revision: revision, issuedAt: now.addingTimeInterval(-1), expiresAt: now.addingTimeInterval(3600), mappings: [mapping])
+}
+private func signedCatalog(_ catalog: SourceMappingCatalog, key: Curve25519.Signing.PrivateKey, keyID: String = "test", mutate: ((inout [String: Any]) -> Void)? = nil) throws -> Data {
+    let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601; encoder.outputFormatting = [.sortedKeys]
+    var payload = try encoder.encode(catalog)
+    if let mutate {
+        var object = try JSONSerialization.jsonObject(with: payload) as! [String: Any]
+        mutate(&object); payload = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+    var message = SourceMappingCatalogStore.signatureDomain; message.append(payload)
+    return try JSONSerialization.data(withJSONObject: ["keyID": keyID, "payload": payload.base64EncodedString(), "signature": try key.signature(for: message).base64EncodedString()])
+}
+
+private func authenticatedCatalog(_ catalog: SourceMappingCatalog, root: URL, now: Date) throws -> AuthenticatedSourceMappingCatalog {
+    let key = Curve25519.Signing.PrivateKey()
+    let store = SourceMappingCatalogStore(root: root.appendingPathComponent("Authenticated-" + UUID().uuidString), trustedKeys: ["test": key.publicKey.rawRepresentation])
+    return try store.accept(signedCatalog(catalog, key: key), now: now)
+}
+
 @main
 private enum Checks {
     static func main() async {
@@ -230,6 +254,118 @@ private enum Checks {
         func check(_ name: String, _ action: () async throws -> Void) async {
             do { try await action(); passed += 1; print("PASS \(name)") }
             catch { failures.append("\(name): \(error)"); print("FAIL \(name): \(error)") }
+        }
+        await check("Signed catalogs retain known-good data and reject unknown publishers and rollback") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let now = Date(); let key = Curve25519.Signing.PrivateKey(); let other = Curve25519.Signing.PrivateKey()
+            let root = fixture.root.appendingPathComponent("Mappings")
+            let store = SourceMappingCatalogStore(root: root, trustedKeys: ["test": key.publicKey.rawRepresentation])
+            let catalog = catalogFixture(try fixture.app(), now: now)
+            let bytes = try signedCatalog(catalog, key: key)
+            try expect(try store.accept(bytes, now: now).revision == 2)
+            try expect(try store.accept(bytes, now: now).revision == 2)
+            for invalid in [try signedCatalog(catalog, key: other), try signedCatalog(catalog, key: key, keyID: "untrusted"), try signedCatalog(catalogFixture(try fixture.app(), now: now, revision: 1), key: key)] {
+                try expectThrows { _ = try store.accept(invalid, now: now) }
+                try expect(try store.load(now: now)?.revision == 2)
+            }
+            var replacement = catalog; replacement.mappings[0].channel = "beta"
+            try expectThrows { _ = try store.accept(signedCatalog(replacement, key: key), now: now) }
+            let noKeys = SourceMappingCatalogStore(root: fixture.root.appendingPathComponent("NoTrust"), trustedKeys: [:])
+            try expectThrows { _ = try noKeys.accept(bytes, now: now) }
+        }
+        await check("Catalog expiry, client minimum and later revision do not reset rollback protection") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let now = Date(); let key = Curve25519.Signing.PrivateKey(); let root = fixture.root.appendingPathComponent("Mappings")
+            let store = SourceMappingCatalogStore(root: root, trustedKeys: ["test": key.publicKey.rawRepresentation])
+            let first = catalogFixture(try fixture.app(), now: now)
+            try store.accept(signedCatalog(first, key: key), now: now)
+            try expectThrows { _ = try store.load(now: now.addingTimeInterval(7200)) }
+            let advanced = SourceMappingCatalogStore(root: root, trustedKeys: ["test": key.publicKey.rawRepresentation], minimumRevision: 3)
+            try expectThrows { _ = try advanced.load(now: now) }
+            let later = now.addingTimeInterval(7200)
+            let next = catalogFixture(try fixture.app(), now: later, revision: 3)
+            try expect(try advanced.accept(signedCatalog(next, key: key), now: later).revision == 3)
+            try expectThrows { _ = try advanced.accept(signedCatalog(first, key: key), now: now) }
+        }
+        await check("Mapping matches require independent bundle, team, channel and compatibility evidence") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let now = Date(); let app = try fixture.app(); let catalog = catalogFixture(app, now: now)
+            let identity = SourceIdentity(bundleID: app.bundleID, signingTeamIdentifier: "TEAMID1234", channel: "stable", macOS: "27.0", architecture: .arm64)
+            let reviewed = try authenticatedCatalog(catalog, root: fixture.root, now: now)
+            let evidence = try reviewed.evidence(mappingID: "example", identity: identity, now: now)
+            try expect(evidence.level == .reviewedMapping && !evidence.permitsManagerUpdate)
+            for conflict in ["bundle", "team", "channel", "unknown-team", "unknown-channel", "os", "receipt"] {
+                var changed = identity
+                switch conflict {
+                case "bundle": changed.bundleID = "different.app"
+                case "team": changed.signingTeamIdentifier = "OTHER12345"
+                case "channel": changed.channel = "beta"
+                case "unknown-team": changed.signingTeamIdentifier = nil
+                case "unknown-channel": changed.channel = nil
+                case "os": changed.macOS = "12.0"
+                default: changed.hasStoreReceipt = true
+                }
+                try expectThrows { _ = try reviewed.evidence(mappingID: "example", identity: changed, now: now) }
+            }
+            var onlyIntel = catalog; onlyIntel.mappings[0].architectures = [.x86_64]
+            let intel = try authenticatedCatalog(onlyIntel, root: fixture.root, now: now)
+            try expectThrows { _ = try intel.evidence(mappingID: "example", identity: identity, now: now) }
+            var unknown = catalog; unknown.mappings[0].signingTeamIdentifier = nil
+            let provisional = try authenticatedCatalog(unknown, root: fixture.root, now: now)
+            try expectThrows { _ = try provisional.evidence(mappingID: "example", identity: identity, now: now) }
+        }
+        await check("Signed mappings reject execution fields, conflicting domains and unsupported schema") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let now = Date(); let key = Curve25519.Signing.PrivateKey(); let catalog = catalogFixture(try fixture.app(), now: now)
+            let store = SourceMappingCatalogStore(root: fixture.root.appendingPathComponent("Mappings"), trustedKeys: ["test": key.publicKey.rawRepresentation])
+            let command = try signedCatalog(catalog, key: key, mutate: { object in
+                var entries = object["mappings"] as! [[String: Any]]; entries[0]["command"] = "untrusted execution"; object["mappings"] = entries
+            })
+            try expectThrows { _ = try store.accept(command, now: now) }
+            for kind in ["domain", "scheme", "user-info", "wildcard", "schema", "duplicate", "selector"] {
+                var changed = catalog
+                switch kind {
+                case "domain": changed.mappings[0].metadataURL = URL(string: "https://evil.example.net/feed")
+                case "scheme": changed.mappings[0].metadataURL = URL(string: "http://updates.example.com/feed")
+                case "user-info": changed.mappings[0].metadataURL = URL(string: "https://user:password@updates.example.com/feed")
+                case "wildcard": changed.mappings[0].officialHosts = ["*.example.com"]
+                case "schema": changed.schemaVersion = 2
+                case "duplicate": var duplicate = changed.mappings[0]; duplicate.id = "another"; changed.mappings.append(duplicate)
+                default: changed.mappings[0].packageID = "--force"
+                }
+                try expectThrows { _ = try store.accept(signedCatalog(changed, key: key), now: now) }
+            }
+        }
+        await check("Mapping evidence survives routes and cannot grant automatic installation") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let now = Date(); var app = try fixture.candidate()
+            try expect(Preferences().isEligible(app), "Legacy installed-manager routes changed")
+            let catalog = catalogFixture(app, now: now)
+            app.sourceEvidence = try authenticatedCatalog(catalog, root: fixture.root, now: now).evidence(mappingID: "example", identity: SourceIdentity(bundleID: app.bundleID, signingTeamIdentifier: "TEAMID1234", channel: "stable", macOS: "27.0", architecture: .arm64), now: now)
+            try expect(!Preferences().isEligible(app), "A signed mapping alone authorized an installer")
+            let route = try JSONDecoder().decode(UpdateRoute.self, from: JSONEncoder().encode(UpdateRoute(app)!))
+            try expect(route.applying(to: try fixture.app()).sourceEvidence == app.sourceEvidence)
+            let release = app.releaseIdentity; app.sourceEvidence?.channel = "beta"
+            try expect(release != app.releaseIdentity)
+            app.sourceEvidence?.level = .installedManager; app.sourceEvidence?.bundleID = "different.app"
+            try expect(!Preferences().isEligible(app), "Evidence for another bundle granted eligibility")
+            let legacy = try JSONDecoder().decode(AppRecord.self, from: JSONEncoder().encode(try fixture.candidate()))
+            try expect(legacy.sourceEvidence == nil && Preferences().isEligible(legacy))
+        }
+        await check("Catalog input and cached files are bounded and do not follow symlinks") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let now = Date(); let key = Curve25519.Signing.PrivateKey(); let root = fixture.root.appendingPathComponent("Mappings")
+            let store = SourceMappingCatalogStore(root: root, trustedKeys: ["test": key.publicKey.rawRepresentation])
+            try expectThrows { _ = try store.accept(Data(repeating: 65, count: 2 * 1024 * 1024 + 1), now: now) }
+            try store.accept(signedCatalog(catalogFixture(try fixture.app(), now: now), key: key), now: now)
+            let cache = root.appendingPathComponent("source-mapping-catalog.json")
+            let mode = try FileManager.default.attributesOfItem(atPath: cache.path)[.posixPermissions] as! NSNumber
+            try expect(mode.intValue & 0o777 == 0o600)
+            let retained = fixture.root.appendingPathComponent("RetainedCatalog")
+            try FileManager.default.moveItem(at: cache, to: retained)
+            try FileManager.default.createSymbolicLink(at: cache, withDestinationURL: retained)
+            try expectThrows { _ = try store.load(now: now) }
+            try expect(FileManager.default.fileExists(atPath: retained.path))
         }
         await check("Numeric versions normalize trailing zeros and compare multi-digit components") {
             try expect(ReleaseComparison.compare("1.0", "1") == .orderedSame)

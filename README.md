@@ -96,6 +96,10 @@ Explicit source preparation installs or updates the source tools themselves, inc
 
 Right-click an app for details, Reveal in Finder, Ignore App, or Skip This Release. **Show ignored** reveals excluded entries; **Settings → Reset All Exclusions** restores them.
 
+## Source-mapping trust foundation
+
+The core defines versioned identity/channel/domain/capability evidence and authenticates supplied catalogs with client-pinned Ed25519 keys, revision/expiry checks and a retained known-good cache. Catalog evidence alone cannot authorize automatic installation. See [the wire format and trust boundary](docs/SOURCE-MAPPING-TRUST.md). No production publisher key or remote catalog endpoint is configured; broad discovery remains separate work.
+
 ## Update and cleanup behavior
 
 Only one Maccet operation can own a canonical application path for the current user at a time, across engines, separate app instances and separate download caches. Another attempt is deferred before source commands or cache creation; unrelated apps remain independent. Ownership spans preflight, installation, verification and cleanup. macOS releases the lock if its owner exits, but Maccet never retries the installation automatically: rescan and review after interruption. Other package-manager clients do not participate in this Maccet ownership protocol.

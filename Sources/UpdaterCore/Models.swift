@@ -46,6 +46,7 @@ public struct AppRecord: Codable, Identifiable, Equatable {
     public var targetBuild: String?
     public var targetPackageVersion: String?
     public var targetVersionIsMarketing: Bool?
+    public var sourceEvidence: SourceEvidence?
     public var targetSHA256: String?
     public var state: CheckState = .unchecked
     public var detail: String = "No supported source has checked this application."
@@ -60,7 +61,7 @@ public struct AppRecord: Codable, Identifiable, Equatable {
         self.hasStoreReceipt = hasStoreReceipt; self.sparkleFeed = sparkleFeed
     }
     public var hasUpdate: Bool { targetVersion != nil && [.updateAvailable, .manual].contains(state) }
-    public var releaseIdentity: String { "\(source?.rawValue ?? "unknown"):\(packageID ?? ""):\(targetVersion ?? "")" + (targetPackageVersion.map { ":package=" + $0 } ?? "") + (targetBuild.map { ":build=" + $0 } ?? "") }
+    public var releaseIdentity: String { "\(source?.rawValue ?? "unknown"):\(packageID ?? ""):\(targetVersion ?? "")" + (targetPackageVersion.map { ":package=" + $0 } ?? "") + (targetBuild.map { ":build=" + $0 } ?? "") + ((sourceEvidence?.channel).map { ":channel=" + $0 } ?? "") }
 }
 
 public struct SourceHealth: Codable, Identifiable {
@@ -107,6 +108,7 @@ public struct Preferences: Codable {
     public func isEligible(_ app: AppRecord) -> Bool {
         app.state == .updateAvailable && app.automatic && app.targetVersion != nil
             && !ignoredPaths.contains(app.id) && skippedReleases[app.id] != app.releaseIdentity
+            && (app.sourceEvidence.map { $0.permitsManagerUpdate && $0.bundleID == app.bundleID } ?? true)
     }
 }
 
@@ -120,6 +122,7 @@ public struct UpdateRoute: Codable, Equatable, Identifiable {
     public var targetBuild: String?
     public var targetPackageVersion: String?
     public var targetVersionIsMarketing: Bool?
+    public var sourceEvidence: SourceEvidence?
     public var targetSHA256: String?
     public var state: CheckState
     public var detail: String
@@ -130,14 +133,14 @@ public struct UpdateRoute: Codable, Equatable, Identifiable {
         guard let source = app.source else { return nil }
         self.source = source; packageID = app.packageID; targetVersion = app.targetVersion
         targetBuild = app.targetBuild; state = app.state; detail = app.detail
-        targetPackageVersion = app.targetPackageVersion; targetVersionIsMarketing = app.targetVersionIsMarketing; targetSHA256 = app.targetSHA256
+        targetPackageVersion = app.targetPackageVersion; targetVersionIsMarketing = app.targetVersionIsMarketing; sourceEvidence = app.sourceEvidence; targetSHA256 = app.targetSHA256
         checkedAt = app.checkedAt; automatic = app.automatic; executable = app.routeExecutable
     }
     public func applying(to original: AppRecord) -> AppRecord {
         var app = original
         app.source = source; app.packageID = packageID; app.targetVersion = targetVersion
         app.targetBuild = targetBuild; app.state = state; app.detail = detail
-        app.targetPackageVersion = targetPackageVersion; app.targetVersionIsMarketing = targetVersionIsMarketing; app.targetSHA256 = targetSHA256
+        app.targetPackageVersion = targetPackageVersion; app.targetVersionIsMarketing = targetVersionIsMarketing; app.sourceEvidence = sourceEvidence; app.targetSHA256 = targetSHA256
         app.checkedAt = checkedAt; app.automatic = automatic; app.routeExecutable = executable
         return app
     }
@@ -156,7 +159,7 @@ public enum SourceResolver {
         if allowed.count == 1 { return allowed[0].applying(to: app) }
         if allowed.count > 1 {
             app.source = nil; app.packageID = nil; app.targetVersion = nil; app.targetBuild = nil
-            app.targetPackageVersion = nil; app.targetVersionIsMarketing = nil; app.targetSHA256 = nil
+            app.targetPackageVersion = nil; app.targetVersionIsMarketing = nil; app.sourceEvidence = nil; app.targetSHA256 = nil
             app.routeExecutable = nil; app.automatic = false; app.state = .ambiguous
             app.detail = "Several managers claim this application. Choose one verified route in Details before updating."
         }

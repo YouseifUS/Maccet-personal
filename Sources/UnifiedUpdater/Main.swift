@@ -23,7 +23,10 @@ enum Entry {
     private static func diagnostics() async {
         if CommandLine.arguments.contains("--check-startup-script") {
             do {
-                _ = try await ProcessRunner().run("/bin/bash", ["-n", DependencySetup.scriptURL.path]).checked()
+                guard let script = DependencySetup.packagedScriptURL else {
+                    throw UpdaterError("Packaged startup script is missing.")
+                }
+                _ = try await ProcessRunner().run("/bin/bash", ["-n", script.path]).checked()
                 print("Bundled startup script is available and has valid syntax.")
             } catch { FileHandle.standardError.write(Data((error.localizedDescription + "\n").utf8)); exit(1) }
             return
@@ -69,6 +72,15 @@ struct DesktopApp: App {
                             .credits: NSAttributedString(string: "Alpha\nA little less to keep up with.", attributes: [.font: NSFont.systemFont(ofSize: 12)])
                         ])
                     }
+                }
+                CommandMenu("Navigate") {
+                    ForEach(Array(Screen.allCases.enumerated()), id: \.element.id) { index, screen in
+                        Button(screen.rawValue) { model.screen = screen }
+                            .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
+                    }
+                }
+                CommandGroup(after: .textEditing) {
+                    Button("Find Application") { model.focusApplicationSearch() }.keyboardShortcut("f", modifiers: .command)
                 }
                 CommandGroup(after: .appInfo) {
                     Button("Check for Updates") { model.scan() }.keyboardShortcut("r", modifiers: .command).disabled(model.busy)

@@ -23,7 +23,7 @@ enum Maccet {
     static let sidebarSecondary = color(0xA8B9C6, 0xA8B9C6)
     static let text = color(0x102B3D, 0xEEF4F7)
     static let secondary = color(0x576A78, 0xA7B8C5)
-    static let tertiary = color(0x617481, 0x8FA5B5)
+    static let tertiary = color(0x5C6E7A, 0x8FA5B5)
     static let border = color(0xDDE3E6, 0x2C4050)
     static let selection = color(0xE8EEF2, 0x193B52)
     static let accent = color(0xB54708, 0xFF9B57)
@@ -149,6 +149,8 @@ struct MetricCard: View {
         }.padding(20).frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
             .background(highlighted ? Maccet.softOrange : Maccet.surface, in: RoundedRectangle(cornerRadius: 14))
             .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Maccet.border))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(title): \(value.replacingOccurrences(of: " / ", with: " of ")). \(subtitle).")
     }
 }
 struct EmptyState: View {

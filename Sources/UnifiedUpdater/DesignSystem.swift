@@ -180,7 +180,7 @@ struct AttentionBanner: View {
             }.fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
             Button("View Sources") { model.screen = .sources }
-            if model.setupNeedsAttention { Button("Retry Setup", action: model.prepareSources).disabled(model.busy) }
+            if model.setupNeedsAttention { Button(model.setupActionTitle, action: model.prepareSources).disabled(model.busy) }
         }.font(.system(size: 13)).foregroundStyle(StatusTone.attention.foreground).padding(16)
             .background(StatusTone.attention.background, in: RoundedRectangle(cornerRadius: 12))
     }

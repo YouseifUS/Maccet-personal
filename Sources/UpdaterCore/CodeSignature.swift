@@ -85,3 +85,21 @@ public enum InstalledPublisherIdentity {
         return team
     }
 }
+
+public enum DeveloperIDValidation {
+    public static func validate(path: String, bundleID: String, team: String) throws {
+        guard bundleID.range(of: #"\A[A-Za-z0-9.-]{1,255}\z"#, options: .regularExpression) != nil,
+              team.range(of: #"\A[A-Z0-9]{10}\z"#, options: .regularExpression) != nil else { throw UpdaterError("Invalid pinned publisher identity.") }
+        let text = "identifier \"" + bundleID + "\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"" + team + "\""
+        var requirement: SecRequirement?
+        var code: SecStaticCode?
+        let flags = SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures | kSecCSCheckNestedCode)
+        guard SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess else {
+            throw UpdaterError("The pinned Developer ID requirement could not be created.")
+        }
+        guard SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &code) == errSecSuccess,
+              let code, let requirement, SecStaticCodeCheckValidity(code, flags, requirement) == errSecSuccess else {
+            throw UpdaterError("The application does not satisfy the pinned Developer ID publisher and bundle requirement.")
+        }
+    }
+}

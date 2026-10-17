@@ -57,6 +57,7 @@ public struct AppRecord: Codable, Identifiable, Equatable {
     public var routeExecutable: String?
     public var routes: [UpdateRoute]?
     public var catalogCandidates: [CatalogCandidate]?
+    public var vendorObservation: VendorObservation?
 
     public init(name: String, path: String, bundleID: String, version: String, build: String = "", hasStoreReceipt: Bool = false, sparkleFeed: String? = nil) {
         self.name = name; self.path = path; self.bundleID = bundleID
@@ -104,6 +105,7 @@ public struct Preferences: Codable {
     public var cleanupAfterSuccess = true
     public var preferredSources: [String: UpdateSource]?
     public var checkEmbeddedSparkleFeeds: Bool?
+    public var checkOfficialVendorReleases: Bool?
     public var discoveryCatalog: DiscoveryCatalogConfiguration?
     public var discoveryChannelReviews: [String: DiscoveryChannelReview]?
     public var includeSystemApplications: Bool?

@@ -6,6 +6,7 @@ public struct ScanService {
     public let cacheRoot: URL?
     public let sourcePaths: [UpdateSource: String]
     public var sparkleChecker = SparkleCheck()
+    public var vendorChecker = OfficialVendorService()
     public var discoveryCatalog: AuthenticatedSourceMappingCatalog?
     public init(runner: any CommandRunning = ProcessRunner(), cacheRoot: URL? = nil, sourcePaths: [UpdateSource: String]? = nil) {
         self.runner = runner; self.cacheRoot = cacheRoot
@@ -61,12 +62,36 @@ public struct ScanService {
             result.sources.append(health)
             await onPartial?(result)
         }
+        if preferences.checkOfficialVendorReleases == true {
+            var checks = 0
+            let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+            for index in result.apps.indices where OfficialVendorService.recognizes(result.apps[index]) && result.apps[index].state != .systemManaged
+                && !result.apps[index].hasStoreReceipt && (result.apps[index].routes ?? []).isEmpty {
+                let observation: VendorObservation
+                if checks >= 8 || ContinuousClock.now >= deadline || Task.isCancelled {
+                    observation = VendorObservation(state: .unsupported, message: "Vendor scan request/time budget reached or canceled. This copy was not requested.")
+                } else {
+                    checks += 1
+                    observation = await vendorChecker.check(result.apps[index], review: preferences.discoveryChannelReviews?[result.apps[index].id])
+                }
+                result.apps[index].vendorObservation = observation
+                result.apps[index].detail = observation.message; result.apps[index].automatic = false
+                switch observation.state {
+                case .updateAvailable:
+                    result.apps[index].targetVersion = observation.targetVersion; result.apps[index].state = .manual; result.apps[index].checkedAt = observation.date
+                case .current: result.apps[index].state = .current; result.apps[index].checkedAt = observation.date
+                case .unsupported: result.apps[index].state = .unchecked
+                case .failed: result.apps[index].state = .failed
+                }
+                await onPartial?(result)
+            }
+        }
         // Embedded-feed observations cannot displace a manager or store receipt.
         var feedCount = 0
         let feedDeadline = ContinuousClock.now.advanced(by: .seconds(30))
         for index in result.apps.indices where preferences.checkEmbeddedSparkleFeeds == true && result.apps[index].sparkleFeed != nil
             && !result.apps[index].hasStoreReceipt && result.apps[index].state != .systemManaged
-            && (result.apps[index].routes ?? []).isEmpty {
+            && result.apps[index].vendorObservation == nil && (result.apps[index].routes ?? []).isEmpty {
             let observation: SparkleObservation
             if Task.isCancelled {
                 observation = SparkleObservation(state: .failed, message: "Sparkle check canceled.")

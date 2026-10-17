@@ -29,6 +29,7 @@ struct ContentView: View {
         .tint(Maccet.accent).foregroundStyle(Maccet.text)
         .frame(minWidth: 1080, minHeight: 720)
         .sheet(isPresented: $model.showingReview, onDismiss: { if !model.updating { model.cancelReview() } }) { ReviewSheet().environmentObject(model) }
+        .sheet(item: $model.vendorReview) { plan in VendorHandoffSheet(plan: plan) }
         .sheet(item: $model.inspected) { app in AppDetailSheet(app: app).environmentObject(model) }
         .alert(model.errorTitle, isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("OK") { model.error = nil }
@@ -262,5 +263,5 @@ struct AppRow: View {
             }
     }
     private var duplicateName: Bool { model.apps.filter { $0.name == app.name }.count > 1 }
-    private var sourceName: String { app.state == .systemManaged ? "macOS" : app.source?.title ?? ((app.routes?.count ?? 0) > 1 ? "Multiple" : app.sparkleObservation != nil ? "Sparkle feed" : "Unknown") }
+    private var sourceName: String { app.state == .systemManaged ? "macOS" : app.source?.title ?? ((app.routes?.count ?? 0) > 1 ? "Multiple" : app.vendorObservation != nil ? "Google" : app.sparkleObservation != nil ? "Sparkle feed" : "Unknown") }
 }

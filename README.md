@@ -96,6 +96,12 @@ Explicit source preparation installs or updates the source tools themselves, inc
 
 Right-click an app for details, Reveal in Finder, Ignore App, or Skip This Release. **Show ignored** reveals excluded entries; **Settings → Reset All Exclusions** restores them.
 
+## Official vendor-assisted checks
+
+Enable **Sources → Check supported vendor releases** for the first supported vendor family, Google Chrome. Maccet requires an exact supported bundle, the pinned Google Developer ID requirement, a supported executable architecture and a per-copy channel confirmation in Details. It reads Google's official VersionHistory release metadata and offers a guided review for a newer served release.
+
+**Review Assisted Update** refreshes the target, then records a handoff and opens Google's instructions on request. Complete the update in Chrome, close that copy and use **Activity → Verify Reviewed Result**. Vendor-assisted records remain separate from automatic attempts and are included in exported reports. No vendor installer, policy change or cleanup command runs. Published release metadata cannot establish machine-specific rollout, management policy or compatibility; Chrome remains responsible for those decisions. See [the supported family and verification boundary](docs/OFFICIAL-VENDOR-UPDATES.md).
+
 ## Optional Sparkle feed checks
 
 Enable **Sources → Check embedded Sparkle feeds** to check applications without a manager route or App Store receipt. The setting is off until selected. Compatible numeric releases appear as read-only feed observations; available updates require the application's own updater. Maccet never downloads an enclosure or grants a Sparkle result automatic-installation eligibility.
@@ -199,7 +205,7 @@ CHANGELOG.md
 
 ## Known alpha limitations
 
-- No universal app coverage. Unmanaged direct-download apps remain unchecked.
+- No universal app coverage. Unmapped direct-download apps remain unchecked; optional vendor and embedded-feed observations cover only their documented subsets.
 - Optional Sparkle checks observe numeric default-channel releases from embedded HTTPS feeds. Runtime overrides, custom version comparators, signed appcasts and complex major-upgrade rules require the application’s built-in updater; Maccet does not install Sparkle updates.
 - Homebrew and MacPorts are implemented. Nix, pkgsrc/pkgin, developer package updates, app adoption, scheduling, and notifications remain future work.
 - MacPorts is tested with controlled fixtures against its documented command formats; it is not installed on the validation machine, so real MacPorts upgrades remain unverified.
@@ -215,4 +221,4 @@ CHANGELOG.md
 
 ## Next releases
 
-Current development version: **0.1.2**. Next priorities: production reviewed catalogs, source-specific release checks, Nix profile-aware routing, pkgsrc/pkgin, broader real-device validation, and reviewed source adoption. Sparkle and vendor endpoints can further cover apps not owned by a package manager. See the product specification for the broader roadmap.
+Current development version: **0.1.2**. Next priorities: production reviewed catalogs, source-specific release checks, Nix profile-aware routing, pkgsrc/pkgin, broader real-device validation, and reviewed source adoption. Additional Sparkle and vendor families can further cover apps not owned by a package manager. See the product specification for the broader roadmap.

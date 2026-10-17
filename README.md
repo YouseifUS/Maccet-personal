@@ -96,6 +96,12 @@ Explicit source preparation installs or updates the source tools themselves, inc
 
 Right-click an app for details, Reveal in Finder, Ignore App, or Skip This Release. **Show ignored** reveals excluded entries; **Settings → Reset All Exclusions** restores them.
 
+## Optional Sparkle feed checks
+
+Enable **Sources → Check embedded Sparkle feeds** to check applications without a manager route or App Store receipt. The setting is off until selected. Compatible numeric releases appear as read-only feed observations; available updates require the application's own updater. Maccet never downloads an enclosure or grants a Sparkle result automatic-installation eligibility.
+
+Requests reject redirects and use HTTPS, private ephemeral sessions, a 1 MiB response cap and request/resource time limits. A scan starts at most 16 requests within a 30-second start budget; omitted feeds remain unchecked. Results cover the embedded feed's default channel, with runtime overrides explicitly unobserved. See [scope, limits and verification](docs/SPARKLE-CHECKS.md).
+
 ## Source-mapping trust foundation
 
 The core defines versioned identity/channel/domain/capability evidence and authenticates supplied catalogs with client-pinned Ed25519 keys, revision/expiry checks and a retained known-good cache. Catalog evidence alone cannot authorize automatic installation. See [the wire format and trust boundary](docs/SOURCE-MAPPING-TRUST.md). No production publisher key or remote catalog endpoint is configured; broad discovery remains separate work.
@@ -194,7 +200,7 @@ CHANGELOG.md
 ## Known alpha limitations
 
 - No universal app coverage. Unmanaged direct-download apps remain unchecked.
-- Sparkle feed presence is detected, but feeds are not checked or used to install updates.
+- Optional Sparkle checks observe numeric default-channel releases from embedded HTTPS feeds. Runtime overrides, custom version comparators, signed appcasts and complex major-upgrade rules require the application’s built-in updater; Maccet does not install Sparkle updates.
 - Homebrew and MacPorts are implemented. Nix, pkgsrc/pkgin, developer package updates, app adoption, scheduling, and notifications remain future work.
 - MacPorts is tested with controlled fixtures against its documented command formats; it is not installed on the validation machine, so real MacPorts upgrades remain unverified.
 - macOS and source-tool combinations beyond those in the validation notes are not certified.

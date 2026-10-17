@@ -40,6 +40,8 @@ public struct AppRecord: Codable, Identifiable, Equatable {
     public var build: String
     public var hasStoreReceipt: Bool
     public var sparkleFeed: String?
+    public var sparkleRequiresSignedFeed: Bool?
+    public var sparkleObservation: SparkleObservation?
     public var source: UpdateSource?
     public var packageID: String?
     public var targetVersion: String?
@@ -100,6 +102,7 @@ public struct Preferences: Codable {
     public var skippedReleases: [String: String] = [:]
     public var cleanupAfterSuccess = true
     public var preferredSources: [String: UpdateSource]?
+    public var checkEmbeddedSparkleFeeds: Bool?
     public var includeSystemApplications: Bool?
     public var inventoryRoots: [String] {
         scanRoots + ((includeSystemApplications ?? true) ? ["/System/Applications", "/System/Library/CoreServices/Applications"] : [])

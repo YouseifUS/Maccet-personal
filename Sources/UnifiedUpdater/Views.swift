@@ -262,5 +262,5 @@ struct AppRow: View {
             }
     }
     private var duplicateName: Bool { model.apps.filter { $0.name == app.name }.count > 1 }
-    private var sourceName: String { app.state == .systemManaged ? "macOS" : app.source?.title ?? ((app.routes?.count ?? 0) > 1 ? "Multiple" : "Unknown") }
+    private var sourceName: String { app.state == .systemManaged ? "macOS" : app.source?.title ?? ((app.routes?.count ?? 0) > 1 ? "Multiple" : app.sparkleObservation != nil ? "Sparkle feed" : "Unknown") }
 }

@@ -81,6 +81,7 @@ public struct AppInventory {
             hasStoreReceipt: FileManager.default.fileExists(atPath: url.appendingPathComponent("Contents/_MASReceipt/receipt").path),
             sparkleFeed: info["SUFeedURL"] as? String
         )
+        app.sparkleRequiresSignedFeed = info["SURequireSignedFeed"].map { ($0 as? Bool) ?? true }
         if Self.isSystemPath(url.path) {
             app.state = .systemManaged
             app.detail = "Included in the inventory. This app is maintained through macOS Software Update and is excluded from third-party package updates."

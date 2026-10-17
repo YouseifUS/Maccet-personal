@@ -98,7 +98,13 @@ struct AppDetailSheet: View {
                             Text("Only the selected manager will update this copy.").font(.system(size: 12, weight: .medium)).foregroundStyle(Maccet.secondary)
                         }
                         if current.hasStoreReceipt { Label("App Store receipt ownership is protected.", systemImage: "lock.shield").font(.system(size: 12)).foregroundStyle(Maccet.secondary) }
-                        if current.sparkleFeed != nil { Label("A Sparkle feed was found. Feed checking is not implemented.", systemImage: "info.circle").font(.system(size: 12)).foregroundStyle(Maccet.secondary) }
+                        if let observation = current.sparkleObservation {
+                            Label("Sparkle · read-only feed check", systemImage: "info.circle").font(.system(size: 12)).foregroundStyle(Maccet.secondary)
+                            Text(observation.message).font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                            if let build = observation.build { detail("Feed release/build", "\(observation.version ?? build) / \(build)") }
+                        } else if current.sparkleFeed != nil {
+                            Text("An embedded Sparkle feed was found. Verified manager routes take priority over feed observations.").font(.system(size: 12)).foregroundStyle(Maccet.secondary)
+                        }
                     }
                 }.padding(.horizontal, 28).padding(.bottom, 24)
             }

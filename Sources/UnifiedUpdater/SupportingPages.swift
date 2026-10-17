@@ -102,6 +102,16 @@ struct SourcesPage: View {
                         DisclosureGroup("Readiness and preparation results", isExpanded: $showSteps) { SetupSteps() }
                     }
                 }
+                Surface {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle("Check embedded Sparkle feeds", isOn: Binding(get: { model.preferences.checkEmbeddedSparkleFeeds == true }, set: { enabled in
+                            model.preferences.checkEmbeddedSparkleFeeds = enabled
+                            model.savePreferences(); model.invalidateInventory()
+                        })).toggleStyle(.switch).disabled(model.busy)
+                        Text("Read release metadata from an application's embedded HTTPS feed when no manager claims it. Default-channel numeric releases are checked; runtime overrides may differ. Updates must be confirmed and installed with the application's own updater.")
+                            .font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 ForEach(model.sources) { source in SourceCard(source: source) }
                 Text("These switches control checks and future source preparation. A disabled manager may still be needed for the enabled App Store helper.").font(.system(size: 12, weight: .medium)).foregroundStyle(Maccet.secondary)
                 if !model.warnings.isEmpty {

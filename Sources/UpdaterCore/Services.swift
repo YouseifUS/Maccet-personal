@@ -5,6 +5,7 @@ public struct ScanService {
     public let runner: any CommandRunning
     public let cacheRoot: URL?
     public let sourcePaths: [UpdateSource: String]
+    public var sparkleChecker = SparkleCheck()
     public init(runner: any CommandRunning = ProcessRunner(), cacheRoot: URL? = nil, sourcePaths: [UpdateSource: String]? = nil) {
         self.runner = runner; self.cacheRoot = cacheRoot
         self.sourcePaths = sourcePaths ?? ToolLocator.defaultSources()
@@ -57,6 +58,38 @@ public struct ScanService {
                 }
             }
             result.sources.append(health)
+            await onPartial?(result)
+        }
+        // Embedded-feed observations cannot displace a manager or store receipt.
+        var feedCount = 0
+        let feedDeadline = ContinuousClock.now.advanced(by: .seconds(30))
+        for index in result.apps.indices where preferences.checkEmbeddedSparkleFeeds == true && result.apps[index].sparkleFeed != nil
+            && !result.apps[index].hasStoreReceipt && result.apps[index].state != .systemManaged
+            && (result.apps[index].routes ?? []).isEmpty {
+            let observation: SparkleObservation
+            if Task.isCancelled {
+                observation = SparkleObservation(state: .failed, message: "Sparkle check canceled.")
+            } else if feedCount >= 16 || ContinuousClock.now >= feedDeadline {
+                observation = SparkleObservation(state: .unsupported, message: "The Sparkle scan request/time budget was reached. This feed was not requested; choose a smaller scan folder to include it.")
+            } else {
+                feedCount += 1
+                observation = await sparkleChecker.check(result.apps[index])
+            }
+            result.apps[index].sparkleObservation = observation
+            result.apps[index].detail = observation.message
+            result.apps[index].automatic = false
+            switch observation.state {
+            case .updateAvailable:
+                result.apps[index].state = .manual
+                result.apps[index].targetVersion = observation.version
+                result.apps[index].targetBuild = observation.build
+                result.apps[index].checkedAt = observation.date
+            case .current:
+                result.apps[index].state = .current
+                result.apps[index].checkedAt = observation.date
+            case .unsupported: result.apps[index].state = .unchecked
+            case .failed: result.apps[index].state = .failed
+            }
             await onPartial?(result)
         }
         result.date = Date()

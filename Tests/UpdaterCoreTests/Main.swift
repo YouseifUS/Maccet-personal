@@ -255,6 +255,155 @@ private enum Checks {
             do { try await action(); passed += 1; print("PASS \(name)") }
             catch { failures.append("\(name): \(error)"); print("FAIL \(name): \(error)") }
         }
+        await check("Sparkle selects builds independently of marketing versions and feed order") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let app = try fixture.app()
+            let checker = SparkleCheck(macOS: "27.0", architecture: "arm64")
+            let result = try checker.evaluate(appcast(feedItem("12", version: "1.2") + feedItem() + feedItem("15", version: "1.5")), app: app)
+            try expect(result.state == .updateAvailable && result.build == "20" && result.version == "2.0")
+            try expect(result.message.contains("default channel") && result.message.contains("runtime"))
+            let current = try checker.evaluate(appcast(feedItem("10", version: "1.0")), app: app)
+            try expect(current.state == .current)
+        }
+        await check("Sparkle honors channels, OS, hardware and minimum installed builds") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            var app = try fixture.app()
+            let checker = SparkleCheck(macOS: "27.0", architecture: "x86_64")
+            let base = feedItem()
+            let variants = [
+                "<sparkle:channel>beta</sparkle:channel>",
+                "<sparkle:minimumSystemVersion>28.0</sparkle:minimumSystemVersion>",
+                "<sparkle:maximumSystemVersion>26.0</sparkle:maximumSystemVersion>",
+                "<sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>",
+                "<sparkle:minimumUpdateVersion>11</sparkle:minimumUpdateVersion>"
+            ]
+            for rule in variants {
+                let result = try checker.evaluate(appcast(base + feedItem("30", version: "3.0", rules: rule)), app: app)
+                try expect(result.build == "20", "Incompatible release selected: " + rule)
+            }
+            app.sourceEvidence = SourceEvidence(level: .reviewedMapping, capability: .checkOnly, bundleID: app.bundleID, signingTeamIdentifier: nil, channel: "beta", officialHosts: [], reviewedAt: Date())
+            let beta = try checker.evaluate(appcast(base + feedItem("30", version: "3.0", rules: variants[0])), app: app)
+            try expect(beta.build == "30")
+            let none = try checker.evaluate(appcast(feedItem(rules: variants[1])), app: app)
+            try expect(none.state == .unsupported)
+        }
+        await check("Sparkle handles legacy version attributes and namespace aliases without fetching enclosures") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let checker = SparkleCheck(macOS: "27.0", architecture: "arm64")
+            let legacy = "<item><enclosure sparkle:version=\"20\" sparkle:shortVersionString=\"2.0\" sparkle:os=\"macos\" url=\"file:///never-open-this\"/></item>"
+            let result = try checker.evaluate(appcast(legacy), app: fixture.app())
+            try expect(result.build == "20")
+            let windows = legacy.replacingOccurrences(of: "macos", with: "windows")
+            try expect(checker.evaluate(appcast(windows), app: fixture.app()).state == .unsupported)
+            let alias = String(decoding: appcast(legacy), as: UTF8.self).replacingOccurrences(of: "sparkle:", with: "s:").replacingOccurrences(of: "xmlns:sparkle", with: "xmlns:s")
+            try expect(checker.evaluate(Data(alias.utf8), app: fixture.app()).build == "20")
+        }
+        await check("Sparkle rejects malicious XML, excessive work and ambiguous release rules") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let checker = SparkleCheck(macOS: "27.0", architecture: "arm64")
+            let bad = [
+                Data("<!DOCTYPE rss [<!ENTITY secret SYSTEM 'file:///etc/passwd'>]><rss/>".utf8),
+                Data("<rss><channel><item>".utf8),
+                Data(repeating: 65, count: SparkleFeedLoader.maximumBytes + 1),
+                appcast(String(repeating: feedItem(), count: 257)),
+                appcast(feedItem(rules: String(repeating: "<x>", count: 17) + String(repeating: "</x>", count: 17))),
+                appcast(feedItem(rules: "<sparkle:hardwareRequirements>futureCPU</sparkle:hardwareRequirements>")),
+                appcast(feedItem(rules: "<sparkle:unknownRequirement>yes</sparkle:unknownRequirement>")),
+                appcast(feedItem("abc")),
+                appcast(feedItem(rules: "<sparkle:version>30</sparkle:version>")),
+                appcast(feedItem(rules: "<sparkle:minimumSystemVersion>27.<x/>0</sparkle:minimumSystemVersion>")),
+                appcast("<item><enclosure sparkle:version=\"20\" sparkle:arch=\"x86_64\" url=\"https://example.com/a\"/></item>"),
+                appcast(feedItem(rules: "<description>" + String(repeating: "a", count: 16385) + "</description>"))
+            ]
+            for bytes in bad { try expectThrows { _ = try checker.evaluate(bytes, app: fixture.app()) } }
+        }
+        await check("Sparkle transport rejects untrusted URL forms before requesting and bounds HTTP data") {
+            for text in ["http://example.com/feed", "file:///tmp/feed", "https://user:pass@example.com/feed", "https://example.com:8443/feed", "https://127.0.0.1/feed", "https://[::1]/feed", "https://localhost/feed", "https://host.local/feed", "https://example.com/feed#secret"] {
+                try expectThrows { try SparkleFeedLoader.validateURL(URL(string: text)!) }
+            }
+            let loader = SparkleFeedLoader(protocolClasses: [FixtureFeedProtocol.self])
+            let url = URL(string: "https://updates.example.com/appcast.xml")!
+            FixtureFeedProtocol.responseStatus = 200
+            FixtureFeedProtocol.responseHeaders = ["Content-Type": "application/rss+xml"]
+            FixtureFeedProtocol.responseData = appcast(feedItem())
+            let loaded = try await loader.load(url)
+            try expect(loaded == FixtureFeedProtocol.responseData)
+            for (status, headers, data) in [
+                (302, ["Content-Type": "application/rss+xml", "Location": "https://other.example.com/feed"], Data()),
+                (404, ["Content-Type": "application/rss+xml"], Data()),
+                (200, ["Content-Type": "text/html"], Data()),
+                (200, ["Content-Type": "application/rss+xml", "Content-Length": "1048577"], Data()),
+                (200, ["Content-Type": "application/rss+xml"], Data(repeating: 65, count: SparkleFeedLoader.maximumBytes + 1))
+            ] {
+                FixtureFeedProtocol.responseStatus = status; FixtureFeedProtocol.responseHeaders = headers; FixtureFeedProtocol.responseData = data
+                do { _ = try await loader.load(url); throw CheckFailure(description: "Unsafe feed response accepted") }
+                catch let error as CheckFailure { throw error }
+                catch { }
+            }
+        }
+        await check("Sparkle signed-feed and custom-version requirements do not make network requests") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            var app = try fixture.app(); app.sparkleFeed = "https://updates.example.com/feed.xml"
+            let loader = FixtureFeedLoader(String(decoding: appcast(feedItem()), as: UTF8.self))
+            let checker = SparkleCheck(loader: loader)
+            app.sparkleRequiresSignedFeed = true
+            let signed = await checker.check(app)
+            try expect(signed.state == .unsupported && loader.requested.isEmpty)
+            app.sparkleRequiresSignedFeed = nil; app.version = "2.0-beta"
+            let custom = await checker.check(app)
+            try expect(custom.state == .unsupported && loader.requested.isEmpty)
+        }
+        await check("Sparkle scans surface read-only updates without granting manager ownership or installation") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let infoURL = fixture.appURL.appendingPathComponent("Contents/Info.plist")
+            var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: infoURL), format: nil) as! [String: Any]
+            info["SUFeedURL"] = "https://updates.example.com/feed.xml"
+            try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: infoURL)
+            let loader = FixtureFeedLoader(String(decoding: appcast(feedItem()), as: UTF8.self))
+            let runner = FakeRunner { _ in throw UpdaterError("No manager command expected") }
+            var service = ScanService(runner: runner, sourcePaths: [:])
+            service.sparkleChecker = SparkleCheck(loader: loader, macOS: "27.0", architecture: "arm64")
+            var prefs = Preferences(); prefs.scanRoots = [fixture.appURL.path]; prefs.includeSystemApplications = false
+            _ = await service.scan(preferences: prefs)
+            try expect(loader.requested.isEmpty, "Sparkle must require explicit opt-in")
+            prefs.checkEmbeddedSparkleFeeds = true
+            let result = await service.scan(preferences: prefs)
+            try expect(result.apps.count == 1 && loader.requested.count == 1)
+            let app = result.apps[0]
+            try expect(app.state == .manual && app.targetBuild == "20" && app.source == nil && app.automatic == false)
+            try expect(!prefs.isEligible(app) && result.checkedCount == 1 && runner.calls.isEmpty)
+            try expect(app.sparkleObservation?.state == .updateAvailable)
+            let copy = try JSONDecoder().decode(ScanResult.self, from: JSONEncoder().encode(result))
+            try expect(copy.apps[0].sparkleObservation == app.sparkleObservation)
+            let receipt = fixture.appURL.appendingPathComponent("Contents/_MASReceipt")
+            try FileManager.default.createDirectory(at: receipt, withIntermediateDirectories: true)
+            try Data().write(to: receipt.appendingPathComponent("receipt"))
+            _ = await service.scan(preferences: prefs)
+            try expect(loader.requested.count == 1, "Store-owned app contacted the feed")
+        }
+        await check("Sparkle scan budgets leave omitted feeds unchecked and managers retain priority") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let infoURL = fixture.appURL.appendingPathComponent("Contents/Info.plist")
+            var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: infoURL), format: nil) as! [String: Any]
+            info["SUFeedURL"] = "https://updates.example.com/feed.xml"
+            try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: infoURL)
+            for index in 1...16 {
+                try FileManager.default.copyItem(at: fixture.appURL, to: fixture.root.appendingPathComponent("Copy\(index).app"))
+            }
+            let loader = FixtureFeedLoader(String(decoding: appcast(feedItem()), as: UTF8.self))
+            var service = ScanService(runner: FakeRunner { _ in throw UpdaterError("No commands expected") }, sourcePaths: [:])
+            service.sparkleChecker = SparkleCheck(loader: loader)
+            var prefs = Preferences(); prefs.scanRoots = [fixture.root.path]; prefs.includeSystemApplications = false; prefs.checkEmbeddedSparkleFeeds = true
+            let result = await service.scan(preferences: prefs)
+            try expect(loader.requested.count == 16 && result.apps.count == 17)
+            try expect(result.apps.filter { $0.state == .unchecked }.count == 1 && result.checkedCount == 16)
+            let managedLoader = FixtureFeedLoader(String(decoding: appcast(feedItem()), as: UTF8.self))
+            var managed = ScanService(runner: try fixture.runner(), sourcePaths: [.homebrew: "/usr/bin/true"])
+            managed.sparkleChecker = SparkleCheck(loader: managedLoader)
+            prefs.scanRoots = [fixture.appURL.path]
+            let managedResult = await managed.scan(preferences: prefs)
+            try expect(managedLoader.requested.isEmpty && managedResult.apps[0].source == .homebrew)
+        }
         await check("Signed catalogs retain known-good data and reject unknown publishers and rollback") {
             let fixture = try Fixture(); defer { fixture.clean() }
             let now = Date(); let key = Curve25519.Signing.PrivateKey(); let other = Curve25519.Signing.PrivateKey()

@@ -126,9 +126,9 @@ public struct HomebrewAdapter {
                 app.state = .newerInstalled; app.detail = "The installed app is newer than Homebrew's catalog."; return app
             }
             let versionMatches: Bool
-            if let display = cask.displayVersion, let build = cask.buildVersion {
+            if let display = cask.displayVersion {
                 versionMatches = ReleaseComparison.compare(app.version, display) == .orderedSame
-                    && ReleaseComparison.compare(app.build, build) == .orderedSame
+                    && (cask.buildVersion.map { ReleaseComparison.compare(app.build, $0) == .orderedSame } ?? true)
             } else { versionMatches = ReleaseComparison.satisfies(app, target: cask.version) }
             if versionMatches {
                 app.state = .current; app.detail = "Installed metadata matches the available Homebrew release."; return app
@@ -136,7 +136,9 @@ public struct HomebrewAdapter {
             guard outdated.contains(cask.token) else {
                 app.detail = "Homebrew does not report an update, but installed app metadata could not be reconciled with its catalog."; return app
             }
-            app.targetVersion = cask.version
+            app.targetVersion = target
+            app.targetPackageVersion = cask.version
+            app.targetVersionIsMarketing = cask.displayVersion != nil
             app.targetBuild = cask.buildVersion
             app.targetSHA256 = cask.sha256
             app.state = .updateAvailable; app.automatic = cask.simpleApp && !cask.pinned && !cask.disabled
@@ -146,7 +148,7 @@ public struct HomebrewAdapter {
                 app.state = .manual; app.automatic = false
                 app.detail = "This cask has no valid SHA-256 digest to review. Update through Homebrew manually."
             }
-            if cask.version.split(separator: ",").contains(where: { ReleaseComparison.compare(String($0), String($0)) == nil }) {
+            if target.split(separator: ",").contains(where: { ReleaseComparison.compare(String($0), String($0)) == nil }) {
                 app.state = .manual; app.automatic = false; app.detail = "This vendor version needs a source-specific verifier. Update through Homebrew manually."
             }
             if let minimum = cask.macOSMinimum {

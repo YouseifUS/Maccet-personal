@@ -110,6 +110,7 @@ public struct UpdateEngine {
               checked.packageID == app.packageID, checked.targetVersion == app.targetVersion,
               checked.targetBuild == app.targetBuild,
               checked.targetPackageVersion == app.targetPackageVersion,
+              checked.targetVersionIsMarketing == app.targetVersionIsMarketing,
               checked.targetSHA256 == app.targetSHA256,
               checked.state == .updateAvailable, checked.automatic else {
             throw UpdaterError("The source, target release, or installation capability changed. Rescan and review a new plan.")
@@ -181,13 +182,16 @@ public struct UpdateEngine {
         guard before.bundleID == after.bundleID, before.path == after.path, before.hasStoreReceipt == after.hasStoreReceipt,
               before.version != after.version || before.build != after.build, let target = before.targetVersion else { return false }
         // App Store and MacPorts targets are marketing versions. Only Homebrew
-        // catalog versions can also describe a build or a version/build pair.
+        // catalog fallbacks can also describe a build or a version/build pair.
+        // Explicit Homebrew display metadata always identifies a marketing release.
         let matchesTarget: Bool
         switch before.source {
         case .appStore, .macPorts:
             matchesTarget = ReleaseComparison.compare(after.version, target) == .orderedSame
         default:
-            matchesTarget = ReleaseComparison.satisfies(after, target: target)
+            matchesTarget = before.targetVersionIsMarketing == true
+                ? ReleaseComparison.compare(after.version, target) == .orderedSame
+                : ReleaseComparison.satisfies(after, target: target)
         }
         return matchesTarget
             && (before.targetBuild.map { ReleaseComparison.compare(after.build, $0) == .orderedSame } ?? true)

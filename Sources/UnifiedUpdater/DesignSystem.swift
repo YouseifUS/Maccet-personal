@@ -81,6 +81,7 @@ enum StatusTone {
         switch state {
         case .succeeded: return .success
         case .failed, .interrupted: return .failure
+        case .needsAttention: return .attention
         case .installing, .verifying, .preflight: return .update
         default: return .neutral
         }

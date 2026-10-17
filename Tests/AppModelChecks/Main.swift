@@ -138,6 +138,44 @@ private final class ControlledRunner: CommandRunning {
             try expect(s.installs.count == 1, "Remaining apps reached installation")
             try expect(s.model.history.filter { $0.state == .succeeded }.count == 1 && s.model.history.filter { $0.state == .canceled }.count == 2, "Active install was not verified independently of remaining cancellation")
         }
+        await check("Quiet App Store observations remain active, allow handoff and recover after output resumes") {
+            let s = try Session(); defer { s.clean() }
+            var app = try s.candidates()[0]; app.source = .appStore; app.packageID = "123456789"; app.hasStoreReceipt = true
+            let record = ActivityRecord(app: app, state: .installing, message: "Started automatic command")
+            s.model.history = [record]; s.model.updating = true
+            let quiet = ProcessObservation(processID: 123, elapsedSeconds: 150, silentSeconds: 130, stdoutBytes: 10, stderrBytes: 0, isRunning: true)
+            s.model.observeCommand(record.id, observation: quiet)
+            try expect(s.model.history[0].state == .needsAttention && s.model.history[0].state.isActive, "Quiet command was finalized or hidden")
+            try expect(s.model.busy && s.model.preventsQuit, "Active installer lost protection")
+            try expect(s.model.appStoreHandoffURL(for: record.id)?.absoluteString == "macappstore://itunes.apple.com/app/id123456789", "Official store handoff was unavailable")
+            try expect(!s.model.canVerifyAssisted(record.id), "Verification became available during the active installer")
+            let output = ProcessObservation(processID: 123, elapsedSeconds: 151, silentSeconds: 0, stdoutBytes: 100, stderrBytes: 0, isRunning: true)
+            s.model.observeCommand(record.id, observation: output)
+            try expect(s.model.history[0].state == .installing && s.model.history[0].automaticAttentionMessage != nil, "Resumed output erased earlier attention evidence")
+            try expect(s.installs.isEmpty, "Observation launched an application update")
+        }
+        await check("Assisted result verification preserves an automatic failure and never starts an installer") {
+            let s = try Session(); defer { s.clean() }
+            let receipt = s.root.appendingPathComponent("Applications/one.app/Contents/_MASReceipt")
+            try FileManager.default.createDirectory(at: receipt, withIntermediateDirectories: true)
+            try Data().write(to: receipt.appendingPathComponent("receipt"))
+            var app = try AppInventory().read(s.root.appendingPathComponent("Applications/one.app").path)
+            app.source = .appStore; app.packageID = "123456789"; app.targetVersion = "2.0"; app.routeExecutable = s.executable
+            s.model.review = [PlannedUpdate(app: app, preview: "Reviewed fixture")]
+            s.model.startUpdates(requestQuit: false)
+            try await s.wait()
+            let original = s.model.history[0]
+            try expect(original.state == .failed && s.model.canVerifyAssisted(original.id), "Settled failure lost its reviewed context")
+            s.model.verifyAssistedResult(original.id); try await s.wait()
+            try expect(s.model.history[0].assistedVerification?.verified == false, "Unchanged application was accepted")
+            try s.write("one", version: "2.0")
+            s.model.verifyAssistedResult(original.id); try await s.wait()
+            let result = s.model.history[0]
+            try expect(result.assistedVerification?.verified == true && result.state == .failed && result.message == original.message, "Assisted result rewrote automatic history")
+            try expect(s.installs.isEmpty && !s.model.canVerifyAssisted(original.id), "Verification started or enabled repeated installation")
+            let persisted = try s.model.store.load([ActivityRecord].self, file: "history.json")
+            try expect(persisted[0].assistedVerification?.verified == true && persisted[0].state == .failed, "Separate assisted outcome was not saved")
+        }
         await check("Store filters, selection and missing-source attention remain truthful") {
             let s = try Session(); defer { s.clean() }
             var apps = try s.candidates(); apps[0].hasStoreReceipt = true; apps[0].source = .appStore

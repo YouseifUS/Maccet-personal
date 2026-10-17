@@ -163,7 +163,7 @@ private struct SourceCard: View {
 
 struct ActivityPage: View {
     @EnvironmentObject var model: AppModel
-    private var current: ActivityRecord? { model.history.first { [.preflight, .installing, .verifying].contains($0.state) } ?? model.history.last { $0.state == .queued } }
+    private var current: ActivityRecord? { model.history.first { [.preflight, .installing, .needsAttention, .verifying].contains($0.state) } ?? model.history.last { $0.state == .queued } }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -201,7 +201,7 @@ struct ActivityPage: View {
             }.padding(.horizontal, 28).padding(.bottom, 28)
         }
     }
-    private func stage(_ state: TaskState) -> Int { switch state { case .queued: return 0; case .preflight: return 1; case .installing: return 2; case .verifying: return 3; default: return 4 } }
+    private func stage(_ state: TaskState) -> Int { switch state { case .queued: return 0; case .preflight: return 1; case .installing, .needsAttention: return 2; case .verifying: return 3; default: return 4 } }
 }
 private struct HistoryCard: View {
     @EnvironmentObject var model: AppModel
@@ -228,9 +228,26 @@ private struct HistoryCard: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(entry.message)
                         Text(entry.appPath).font(.system(size: 11, design: .monospaced))
+                        if let observation = entry.lastProcessObservation { Text(observation.message) }
+                        if let attention = entry.automaticAttentionMessage { Text("Automatic attempt observation: " + attention) }
                         if let cleanup = entry.cleanupMessage { Label(cleanup, systemImage: "sparkles") }
                     }.font(.system(size: 12)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 10)
                 }.font(.system(size: 12))
+                if let assisted = entry.assistedVerification {
+                    Label(assisted.verified ? "Assisted target verified" : "Assisted target not verified", systemImage: assisted.verified ? "checkmark.shield" : "exclamationmark.triangle")
+                        .font(.system(size: 12, weight: .medium)).foregroundStyle(assisted.verified ? StatusTone.success.foreground : StatusTone.attention.foreground)
+                    Text(assisted.message).font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                if model.appStoreHandoffURL(for: entry.id) != nil {
+                    HStack {
+                        Button("Open App Store") { model.openAppStoreHandoff(for: entry.id) }
+                        if model.canVerifyAssisted(entry.id) {
+                            Button("Verify Assisted Result") { model.verifyAssistedResult(entry.id) }.disabled(model.busy)
+                        }
+                    }
+                    Text(entry.state.isActive ? "Inspect App Store or the authorization dialog. Verification is available after the automatic command settles; the active installer is allowed to finish." : "Complete the update in App Store, then verify the reviewed target. Verification context is available for reviews made in this session.")
+                        .font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                }
                 if [.failed, .deferred, .interrupted].contains(entry.state) {
                     Button("Rescan Before Retrying", action: model.scan).disabled(model.busy)
                 }

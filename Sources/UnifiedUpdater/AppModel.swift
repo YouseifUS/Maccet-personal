@@ -41,6 +41,9 @@ final class AppModel: ObservableObject {
     @Published var preparing = false
     @Published var updating = false
     @Published var cancelRequested = false
+    @Published var verifyingAssistedResult = false
+    private var assistedPlans: [UUID: PlannedUpdate] = [:]
+    private var lastObservationSave: [UUID: TimeInterval] = [:]
     @Published var search = ""
     @Published var sourceFilter: UpdateSource?
     @Published var showIgnored = false
@@ -56,7 +59,7 @@ final class AppModel: ObservableObject {
     let runner: any CommandRunning
     private let setupLocate: (String) -> String?
     private let sourcePaths: [UpdateSource: String]?
-    var busy: Bool { settingUp || refreshingMetadata || scanning || preparing || updating }
+    var busy: Bool { settingUp || refreshingMetadata || scanning || preparing || updating || verifyingAssistedResult }
     var preventsQuit: Bool { updating || maintainingSources || refreshingMetadata }
     var setupNeedsAttention: Bool { setupItems.contains { $0.phase.needsAttention } }
     var setupActionTitle: String { setupWasPrepared ? (setupNeedsAttention ? "Retry Setup" : "Prepare Sources Again") : "Prepare Sources" }
@@ -216,7 +219,11 @@ final class AppModel: ObservableObject {
         for item in plan {
             let entry = ActivityRecord(app: item.app, state: .queued, message: "Waiting in the reviewed queue.")
             history.insert(entry, at: 0); ids[item.id] = entry.id
+            if item.app.source == .appStore && item.app.hasStoreReceipt { assistedPlans[entry.id] = item }
         }
+        let retained = Set(history.prefix(1000).map(\.id))
+        assistedPlans = assistedPlans.filter { retained.contains($0.key) }
+        lastObservationSave = [:]
         do { try saveHistory() } catch { self.error = error.localizedDescription; updating = false; return }
         Task { [self] in
             for item in plan {
@@ -241,7 +248,9 @@ final class AppModel: ObservableObject {
                     changeRecord(id, state: .canceled, message: "Canceled before installation started."); continue
                 }
                 status = "Updating \(item.app.name)…"
-                var result = await engine.execute(item, cleanup: cleanup) { [weak self] stage, message in
+                var result = await engine.execute(item, cleanup: cleanup, onObservation: { [weak self] observation in
+                    await MainActor.run { self?.observeCommand(id, observation: observation) }
+                }) { [weak self] stage, message in
                     guard let self else { throw UpdaterError("The update session ended.") }
                     try await MainActor.run {
                         if self.cancelRequested && stage == .installing { throw CancellationError() }
@@ -256,6 +265,54 @@ final class AppModel: ObservableObject {
             updating = false; status = "Queue finished. Check Activity for verified results."
             // A new read-only check prevents old successful candidates remaining actionable.
             scan()
+        }
+    }
+
+    func observeCommand(_ id: UUID, observation: ProcessObservation) {
+        guard let index = history.firstIndex(where: { $0.id == id }),
+              [.installing, .needsAttention].contains(history[index].state) else { return }
+        let previousState = history[index].state
+        history[index].lastProcessObservation = observation
+        if observation.isRunning {
+            history[index].state = observation.needsAttention ? .needsAttention : .installing
+            history[index].message = observation.message
+            if observation.needsAttention {
+                history[index].automaticAttentionMessage = observation.message
+                status = "\(history[index].appName) needs attention. See Activity."
+            } else if previousState == .needsAttention { status = "Updating \(history[index].appName)…" }
+        }
+        if previousState != history[index].state || !observation.isRunning
+            || observation.elapsedSeconds - (lastObservationSave[id] ?? -15) >= 15 {
+            lastObservationSave[id] = observation.elapsedSeconds
+            do { try saveHistory() } catch { self.error = error.localizedDescription; cancelRequested = true }
+        }
+    }
+    func appStoreHandoffURL(for id: UUID) -> URL? {
+        guard let record = history.first(where: { $0.id == id }), record.source == .appStore,
+              [.needsAttention, .failed, .interrupted].contains(record.state) else { return nil }
+        if let storeID = record.storeID, (try? ToolLocator.validateStoreID(storeID)) != nil {
+            return URL(string: "macappstore://itunes.apple.com/app/id" + storeID)
+        }
+        return URL(string: "macappstore://showUpdatesPage")
+    }
+    func openAppStoreHandoff(for id: UUID) {
+        if let url = appStoreHandoffURL(for: id) { NSWorkspace.shared.open(url) }
+    }
+    func canVerifyAssisted(_ id: UUID) -> Bool {
+        guard let record = history.first(where: { $0.id == id }) else { return false }
+        return record.source == .appStore && record.state == .failed && assistedPlans[id] != nil
+            && record.assistedVerification?.verified != true
+    }
+    func verifyAssistedResult(_ id: UUID) {
+        guard !busy, canVerifyAssisted(id), let plan = assistedPlans[id] else { return }
+        verifyingAssistedResult = true
+        Task { [self] in
+            let result = await Task.detached { UpdateEngine.verifyAssisted(plan) }.value
+            if let index = history.firstIndex(where: { $0.id == id }) { history[index].assistedVerification = result }
+            do { try saveHistory() } catch { self.error = error.localizedDescription }
+            verifyingAssistedResult = false
+            status = result.verified ? "Assisted result verified. The automatic outcome is retained in Activity." : "Assisted result needs attention. See Activity."
+            if result.verified { scan() }
         }
     }
 

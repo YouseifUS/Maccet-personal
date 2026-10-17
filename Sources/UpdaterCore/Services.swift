@@ -127,10 +127,11 @@ public struct UpdateEngine {
         return checked
     }
 
-    public func execute(_ plan: PlannedUpdate, cleanup: Bool, onStage: @escaping (TaskState, String) async throws -> Void) async -> ActivityRecord {
+    public func execute(_ plan: PlannedUpdate, cleanup: Bool, onObservation: ((ProcessObservation) async -> Void)? = nil, onStage: @escaping (TaskState, String) async throws -> Void) async -> ActivityRecord {
         let app = plan.app
         var record = ActivityRecord(app: app, state: .preflight, message: "Revalidating identity and target release.")
         var ownedCache: OwnedUpdateCache?
+        let observations = OperationObservationHistory()
         do {
             guard let ownership = try ApplicationUpdateOwnership.acquire(for: app.path) else {
                 record.state = .deferred
@@ -171,7 +172,10 @@ public struct UpdateEngine {
                 try await onStage(.installing, "Installing the reviewed release through App Store.")
                 try plan.reviewedSignature.validate(at: app.path)
                 try plan.validateReviewedTool()
-                try await AppStoreAdapter(executable: app.routeExecutable!, runner: runner).upgrade(app)
+                try await AppStoreAdapter(executable: app.routeExecutable!, runner: runner).upgrade(app) { observation in
+                    await observations.receive(observation)
+                    await onObservation?(observation)
+                }
             }
             try await onStage(.verifying, "Reading the installed application again.")
             var verified = false
@@ -202,7 +206,29 @@ public struct UpdateEngine {
             record.state = .failed; record.message = Diagnostics.redact(error.localizedDescription)
             record.cleanupMessage = ownedCache.map { "No cleanup performed. Failed-attempt artifacts retained at " + Diagnostics.redact($0.folder.path) } ?? "No cleanup performed for this attempt."
         }
+        let snapshot = await observations.snapshot()
+        record.lastProcessObservation = snapshot.0
+        record.automaticAttentionMessage = snapshot.1
         return record
+    }
+    /// A separate observation after a settled automatic attempt; it never rewrites
+    /// the original attempt's outcome or removes its artifacts.
+    public static func verifyAssisted(_ plan: PlannedUpdate) -> AssistedVerification {
+        do {
+            guard plan.app.source == .appStore, plan.app.hasStoreReceipt,
+                  let id = plan.app.packageID else { throw UpdaterError("This review has no App Store identity.") }
+            try ToolLocator.validateStoreID(id)
+            guard let ownership = try ApplicationUpdateOwnership.acquire(for: plan.app.path) else {
+                throw UpdaterError("An update still owns this application. Wait for its command to settle before verifying an assisted result.")
+            }
+            defer { ownership.release() }
+            let installed = try AppInventory().read(plan.app.path)
+            guard verify(before: plan.app, after: installed) else { throw UpdaterError("The reviewed App Store target, path, bundle identity or receipt could not be verified.") }
+            try plan.reviewedSignature.validate(at: plan.app.path)
+            return AssistedVerification(verified: true, message: "Independently observed the reviewed target after the App Store handoff. The automatic attempt's original outcome is retained; no cleanup was performed.")
+        } catch {
+            return AssistedVerification(verified: false, message: Diagnostics.redact(error.localizedDescription))
+        }
     }
     // Metadata comparison only; execute also validates the reviewed code signature.
     public static func verify(before: AppRecord, after: AppRecord) -> Bool {

@@ -176,9 +176,9 @@ public enum SourceResolver {
 }
 
 public enum TaskState: String, Codable {
-    case queued, preflight, installing, verifying, succeeded, failed, deferred, canceled, interrupted
-    public var title: String { rawValue.capitalized }
-    public var isActive: Bool { [.queued, .preflight, .installing, .verifying].contains(self) }
+    case queued, preflight, installing, needsAttention, verifying, succeeded, failed, deferred, canceled, interrupted
+    public var title: String { self == .needsAttention ? "Needs attention" : rawValue.capitalized }
+    public var isActive: Bool { [.queued, .preflight, .installing, .needsAttention, .verifying].contains(self) }
 }
 
 public struct ActivityRecord: Codable, Identifiable {
@@ -192,8 +192,13 @@ public struct ActivityRecord: Codable, Identifiable {
     public var state: TaskState
     public var message: String
     public var cleanupMessage: String?
+    public var lastProcessObservation: ProcessObservation?
+    public var automaticAttentionMessage: String?
+    public var storeID: String?
+    public var assistedVerification: AssistedVerification?
     public init(app: AppRecord, state: TaskState, message: String) {
         appName = app.name; appPath = app.path; source = app.source
+        storeID = app.source == .appStore ? app.packageID : nil
         fromVersion = app.version; targetVersion = app.targetVersion ?? "Unknown"
         self.state = state; self.message = message
     }

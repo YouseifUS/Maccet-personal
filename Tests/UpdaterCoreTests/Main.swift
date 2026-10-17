@@ -651,6 +651,122 @@ private enum Checks {
                 } catch let error as UpdaterError { try expect(error.message.contains("does not satisfy"), error.message) }
             }
         }
+        await check("Owned command observations distinguish output evidence from quiet waiting without declaring a stall") {
+            let recorder = ObservationsRecorder()
+            let result = try await ProcessRunner(observationInterval: 20_000_000).runObserved("/bin/sh", ["-c", "printf first; sleep 0.3; printf second >&2; sleep 0.3"], environment: [:], timeout: 5) { await recorder.receive($0) }
+            let values = await recorder.snapshot()
+            try expect(result.status == 0 && result.output == "first" && result.errorOutput == "second")
+            try expect(values.contains { $0.isRunning && $0.stdoutBytes > 0 })
+            try expect(values.last?.isRunning == false && values.last?.stdoutBytes == 5 && values.last?.stderrBytes == 6)
+            try expect(values.allSatisfy { !$0.needsAttention && $0.processID != nil })
+            let count = values.count
+            try await Task.sleep(nanoseconds: 100_000_000)
+            let afterReturn = await recorder.snapshot()
+            try expect(afterReturn.count == count, "Observer continued after the command returned")
+            let quiet = ProcessObservation(processID: 123, elapsedSeconds: 150, silentSeconds: 130, stdoutBytes: 0, stderrBytes: 0, isRunning: true)
+            try expect(quiet.needsAttention && quiet.message.contains("Silence does not prove a stall"))
+        }
+        await check("App Store live observations preserve no-timeout installation and sanitized failure") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            var app = try fixture.app(); app.packageID = "123456789"
+            let runner = ObservingFixtureRunner()
+            runner.observations = [ProcessObservation(processID: 123, elapsedSeconds: 150, silentSeconds: 130, stdoutBytes: 0, stderrBytes: 0, isRunning: true)]
+            runner.handler = { _, _ in CommandResult(status: 1, errorOutput: "Controlled failure Bearer SYNTHETIC_TOKEN") }
+            let recorder = ObservationsRecorder()
+            do {
+                try await AppStoreAdapter(executable: "/opt/homebrew/bin/mas", runner: runner, invokingUser: { (501, 20) }).upgrade(app) { await recorder.receive($0) }
+                throw CheckFailure(description: "Expected automatic failure")
+            } catch let error as UpdaterError { try expect(!error.message.contains("SYNTHETIC_TOKEN")) }
+            let values = await recorder.snapshot()
+            try expect(values.count == 1 && values[0].needsAttention && runner.observedCommands == ["/usr/bin/osascript"])
+        }
+        await check("Assisted App Store verification checks reviewed identity and target without mutating the original outcome") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let receipt = fixture.appURL.appendingPathComponent("Contents/_MASReceipt")
+            try FileManager.default.createDirectory(at: receipt, withIntermediateDirectories: true)
+            try Data().write(to: receipt.appendingPathComponent("receipt"))
+            var app = try fixture.app(); app.source = .appStore; app.packageID = "123456789"; app.targetVersion = "2.0"
+            let plan = PlannedUpdate(app: app, preview: "Reviewed store target")
+            try expect(!UpdateEngine.verifyAssisted(plan).verified)
+            try fixture.write(version: "2.0", build: "20")
+            let verification = UpdateEngine.verifyAssisted(plan)
+            try expect(verification.verified)
+            var record = ActivityRecord(app: app, state: .failed, message: "Original automatic failure")
+            record.assistedVerification = verification
+            let restored = try JSONDecoder().decode(ActivityRecord.self, from: JSONEncoder().encode(record))
+            try expect(restored.state == .failed && restored.message == "Original automatic failure" && restored.assistedVerification?.verified == true)
+            try FileManager.default.removeItem(at: receipt)
+            try expect(!UpdateEngine.verifyAssisted(plan).verified)
+            try FileManager.default.createDirectory(at: receipt, withIntermediateDirectories: true)
+            try Data().write(to: receipt.appendingPathComponent("receipt"))
+            let infoURL = fixture.appURL.appendingPathComponent("Contents/Info.plist")
+            var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: infoURL), format: nil) as! [String: Any]
+            info["CFBundleIdentifier"] = "test.wrong.identity"
+            try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: infoURL)
+            try expect(!UpdateEngine.verifyAssisted(plan).verified)
+        }
+        await check("Assisted verification rejects a changed canonical path or invalid reviewed signature") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let receipt = fixture.appURL.appendingPathComponent("Contents/_MASReceipt")
+            try FileManager.default.createDirectory(at: receipt, withIntermediateDirectories: true)
+            try Data().write(to: receipt.appendingPathComponent("receipt"))
+            try fixture.sign()
+            var app = try fixture.app(); app.source = .appStore; app.packageID = "123456789"; app.targetVersion = "2.0"
+            let plan = PlannedUpdate(app: app, preview: "")
+            try fixture.write(version: "2.0", build: "20")
+            try expect(!UpdateEngine.verifyAssisted(plan).verified, "Invalid signature was accepted")
+            let destination = fixture.root.appendingPathComponent("Moved.app")
+            try FileManager.default.moveItem(at: fixture.appURL, to: destination)
+            try FileManager.default.createSymbolicLink(at: fixture.appURL, withDestinationURL: destination)
+            try expect(!UpdateEngine.verifyAssisted(plan).verified)
+        }
+        await check("Assisted verification cannot bypass ownership while an automatic command remains active") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let brew = try fixture.candidate()
+            let barrier = InstallBarrier()
+            let runner = try fixture.runner()
+            let task = Task {
+                await UpdateEngine(runner: runner, sourcePaths: [.homebrew: "/usr/bin/true"])
+                    .execute(PlannedUpdate(app: brew, preview: ""), cleanup: false) { stage, _ in
+                        if stage == .preflight {
+                            await barrier.enter()
+                            while !(await barrier.released) { try await Task.sleep(nanoseconds: 1_000_000) }
+                        }
+                    }
+            }
+            while !(await barrier.entered) { try await Task.sleep(nanoseconds: 1_000_000) }
+            let receipt = fixture.appURL.appendingPathComponent("Contents/_MASReceipt")
+            try FileManager.default.createDirectory(at: receipt, withIntermediateDirectories: true)
+            try Data().write(to: receipt.appendingPathComponent("receipt"))
+            var store = try fixture.app(); store.source = .appStore; store.packageID = "123456789"; store.targetVersion = "2.0"
+            let plan = PlannedUpdate(app: store, preview: "")
+            try fixture.write(version: "2.0", build: "20")
+            let blocked = UpdateEngine.verifyAssisted(plan)
+            await barrier.release()
+            _ = await task.value
+            try expect(!blocked.verified && blocked.message.contains("still owns"))
+            try expect(UpdateEngine.verifyAssisted(plan).verified)
+            try expect(!runner.calls.contains { $0.args.first == "upgrade" })
+        }
+        await check("Observed command timeouts stop their observer and retain an exited process observation") {
+            let recorder = ObservationsRecorder()
+            do {
+                _ = try await ProcessRunner(observationInterval: 10_000_000).runObserved("/bin/sleep", ["2"], environment: [:], timeout: 0.1) { await recorder.receive($0) }
+                throw CheckFailure(description: "Expected benign check timeout")
+            } catch let error as UpdaterError { try expect(error.message.contains("timed out")) }
+            let values = await recorder.snapshot()
+            try expect(values.last?.isRunning == false && values.last?.processID != nil)
+        }
+        await check("Attention history recovers as interrupted and older records decode without fabricated observations") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let active = ActivityRecord(app: try fixture.app(), state: .needsAttention, message: "Waiting without recent output")
+            let recovered = LocalStore(root: fixture.root).recover([active])[0]
+            try expect(recovered.state == .interrupted && recovered.assistedVerification == nil)
+            let old = ActivityRecord(app: try fixture.app(), state: .failed, message: "Earlier attempt")
+            let data = try JSONEncoder().encode(old)
+            let restored = try JSONDecoder().decode(ActivityRecord.self, from: data)
+            try expect(restored.lastProcessObservation == nil && restored.automaticAttentionMessage == nil)
+        }
         await check("Signed catalogs retain known-good data and reject unknown publishers and rollback") {
             let fixture = try Fixture(); defer { fixture.clean() }
             let now = Date(); let key = Curve25519.Signing.PrivateKey(); let other = Curve25519.Signing.PrivateKey()

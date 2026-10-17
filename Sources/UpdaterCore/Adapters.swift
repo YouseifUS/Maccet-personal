@@ -256,7 +256,7 @@ public struct AppStoreAdapter {
             return app
         }
     }
-    public func upgrade(_ app: AppRecord) async throws {
+    public func upgrade(_ app: AppRecord, onObservation: ((ProcessObservation) async -> Void)? = nil) async throws {
         guard let id = app.packageID else { throw UpdaterError("Missing App Store identity.") }
         try ToolLocator.validateStoreID(id)
         guard ["/opt/homebrew/bin/mas", "/usr/local/bin/mas", "/opt/local/bin/mas"].contains(executable) else { throw UpdaterError("Unrecognized mas executable location.") }
@@ -267,6 +267,10 @@ public struct AppStoreAdapter {
         // Only fixed paths and validated numeric values enter the privileged shell.
         let shellCommand = "/usr/bin/env SUDO_UID=\(user.userID) SUDO_GID=\(user.groupID) '" + executable + "' update --inaccurate --check-min-os " + id
         let script = "do shell script \"" + shellCommand + "\" with administrator privileges"
-        _ = try await runner.run("/usr/bin/osascript", ["-e", script], environment: [:], timeout: nil).checked()
+        if let onObservation {
+            _ = try await runner.runObserved("/usr/bin/osascript", ["-e", script], environment: [:], timeout: nil, onObservation: onObservation).checked()
+        } else {
+            _ = try await runner.run("/usr/bin/osascript", ["-e", script], environment: [:], timeout: nil).checked()
+        }
     }
 }

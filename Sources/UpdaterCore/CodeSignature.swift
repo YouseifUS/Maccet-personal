@@ -75,7 +75,13 @@ enum CodeSignatureEvidence {
 /// Only a currently valid certificate-signed bundle establishes a publisher team.
 public enum InstalledPublisherIdentity {
     public static func teamIdentifier(at path: String) -> String? {
-        if case .signed(_, _, let team) = CodeSignatureEvidence.capture(at: path) { return team }
-        return nil
+        guard case .signed(_, _, let team) = CodeSignatureEvidence.capture(at: path), let team else { return nil }
+        var code: SecStaticCode?
+        var requirement: SecRequirement?
+        let flags = SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures | kSecCSCheckNestedCode)
+        guard SecRequirementCreateWithString("anchor apple generic" as CFString, [], &requirement) == errSecSuccess,
+              SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &code) == errSecSuccess,
+              let code, let requirement, SecStaticCodeCheckValidity(code, flags, requirement) == errSecSuccess else { return nil }
+        return team
     }
 }

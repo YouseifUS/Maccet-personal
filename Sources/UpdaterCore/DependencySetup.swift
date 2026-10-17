@@ -66,15 +66,14 @@ public struct DependencySetup {
         _ = try await command("/bin/bash", [Self.scriptURL.path] + arguments, timeout: nil)
     }
     private func probeVersion(_ executable: String, tool: String) async throws -> String {
-        let version = try await command(executable, tool == "brew" ? ["--version"] : ["version"], timeout: 20)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !version.isEmpty else { throw UpdaterError("\(tool) did not report a version.") }
-        if tool == "mas" {
-            guard let major = Int(version.split(separator: ".").first ?? ""), major >= 7 else {
-                throw UpdaterError("mas 7 or later is required. The installed helper reported: " + version)
-            }
+        guard let source = UpdateSource.allCases.first(where: { $0.toolName == tool }) else {
+            throw UpdaterError("Unsupported source tool.")
         }
-        return version
+        let output = try await command(executable, source.versionArguments, timeout: 20)
+        return try SourceToolVersion.validated(output, source: source)
+    }
+    private func versionMessage(tool: String, version: String) -> String {
+        (tool == "brew" ? "Homebrew " : tool == "port" ? "MacPorts " : "mas ") + version
     }
     public func prepare(inventory: InventoryResult? = nil, disabledSources: Set<UpdateSource> = [], retrying previousItems: [SetupItem]? = nil, progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
         await run(inventory: inventory, disabledSources: disabledSources, retrying: previousItems, prepareTools: true, progress: progress)
@@ -106,7 +105,7 @@ public struct DependencySetup {
             }
             items[index].executablePath = canonicalPath
             items[index].version = Diagnostics.redact(version)
-            await report(index, .ready, items[index].id == "mas" ? "mas " + version : version)
+            await report(index, .ready, versionMessage(tool: items[index].id, version: version))
         }
         // Missing metadata cannot prove a source unnecessary. Preserve the
         // conservative enabled-source behavior for incomplete or absent inventory.
@@ -131,7 +130,7 @@ public struct DependencySetup {
                     throw UpdaterError("Tool location changed.")
                 }
                 items[index].version = Diagnostics.redact(version)
-                items[index].message = Diagnostics.redact(items[index].id == "mas" ? "mas " + version : version)
+                items[index].message = Diagnostics.redact(versionMessage(tool: items[index].id, version: version))
             } catch {
                 items[index] = Self.initialItems[index]
             }

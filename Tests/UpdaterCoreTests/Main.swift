@@ -68,6 +68,8 @@ private final class SetupFixture {
     var cancelInstall = false
     var ownedMas = true
     var masVersion = "7.0.0"
+    var brewVersion = "Homebrew 7.0.9"
+    var portVersion = "Version: 2.12.7"
     var brokenTools: Set<String> = []
     let digest = String(repeating: "a", count: 64)
     lazy var runner = FakeRunner { [unowned self] call in
@@ -107,8 +109,8 @@ private final class SetupFixture {
         if self.brokenTools.contains(where: { self.paths[$0] == call.executable }), call.args == ["--version"] || call.args == ["version"] {
             return CommandResult(status: 1, errorOutput: "Tool cannot start")
         }
-        if call.executable == self.paths["brew"], call.args == ["--version"] { return CommandResult(output: "Homebrew 7.0.9") }
-        if call.executable == self.paths["port"], call.args == ["version"] { return CommandResult(output: "Version: 2.12.7") }
+        if call.executable == self.paths["brew"], call.args == ["--version"] { return CommandResult(output: self.brewVersion) }
+        if call.executable == self.paths["port"], call.args == ["version"] { return CommandResult(output: self.portVersion) }
         if call.executable == self.paths["mas"], call.args == ["version"] { return CommandResult(output: self.masVersion) }
         throw UpdaterError("Unexpected setup command: " + call.executable + " " + call.args.joined(separator: " "))
     }
@@ -812,6 +814,49 @@ private enum Checks {
             }
             try expect(fixture.runner.calls.count == 4 && fixture.runner.calls.allSatisfy { $0.timeout == 20 })
         }
+        await check("Readiness rejects malformed tool versions without publishing raw text as a version") {
+            let rows: [(UpdateSource, Int, [String])] = [
+                (.homebrew, 1, ["not a version", "7.0.9", "Homebrew 7.invalid", "Homebrew 7.0.9-junk"]),
+                (.macPorts, 2, ["not a version", "2.12.7", "Version: unknown", "Version: 2.12.7 junk"]),
+                (.appStore, 3, ["not a version", "7garbage.0.0", "7.0", "7.0.0 junk"])
+            ]
+            for (source, index, outputs) in rows {
+                for output in outputs {
+                    let setup = SetupFixture()
+                    if source == .homebrew { setup.brewVersion = output }
+                    if source == .macPorts { setup.portVersion = output }
+                    if source == .appStore { setup.masVersion = output }
+                    let result = await setup.service().checkReadiness(disabledSources: Set(UpdateSource.allCases).subtracting([source]))
+                    try expect(result[index].phase == .failed && result[index].version == nil && setup.actions.isEmpty, "Malformed version was ready: " + output)
+                }
+            }
+        }
+        await check("Source version minimums and normalized values are explicit") {
+            let rows: [(UpdateSource, Int, String, String, String)] = [
+                (.homebrew, 1, "Homebrew 6.0.0", "Homebrew 5.9.9", "6.0.0"),
+                (.macPorts, 2, "Version: 2.8.1", "Version: 2.8.0", "2.8.1"),
+                (.appStore, 3, "7.0.0", "6.9.9", "7.0.0")
+            ]
+            for (source, index, supported, unsupported, normalized) in rows {
+                for (raw, ready) in [(supported, true), (unsupported, false)] {
+                    let setup = SetupFixture()
+                    if source == .homebrew { setup.brewVersion = raw }
+                    if source == .macPorts { setup.portVersion = raw }
+                    if source == .appStore { setup.masVersion = raw }
+                    let result = await setup.service().checkReadiness(disabledSources: Set(UpdateSource.allCases).subtracting([source]))
+                    try expect(result[index].phase == (ready ? .ready : .failed))
+                    try expect(result[index].version == (ready ? normalized : nil))
+                }
+            }
+        }
+        await check("Source scans reject unknown tool versions before parsing manager results") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let runner = FakeRunner { _ in CommandResult(output: "not a version") }
+            var prefs = Preferences(); prefs.scanRoots = [fixture.root.path]; prefs.includeSystemApplications = false; prefs.disabledSources = [.macPorts, .appStore]
+            let result = await ScanService(runner: runner, sourcePaths: [.homebrew: "/usr/bin/true"]).scan(preferences: prefs)
+            try expect(result.checkedCount == 0 && result.sources.first { $0.source == .homebrew }?.error != nil)
+            try expect(runner.calls.count == 1 && runner.calls[0].args == ["--version"])
+        }
         await check("All missing tools remain unavailable without downloading or launching installers") {
             let fixture = SetupFixture(); fixture.paths = [:]; fixture.toolsMissing = true
             let result = await fixture.service().checkReadiness()
@@ -1093,7 +1138,7 @@ private enum Checks {
         await check("A healthy ready helper is reprobed without maintenance and publishes its current version") {
             let fixture = SetupFixture(); fixture.failPorts = true
             let first = await fixture.service().prepare()
-            try expect(first[1].executablePath == ToolLocator.canonicalPath(fixture.paths["brew"]!) && first[1].version == "Homebrew 7.0.9")
+            try expect(first[1].executablePath == ToolLocator.canonicalPath(fixture.paths["brew"]!) && first[1].version == "7.0.9")
             let callCount = fixture.runner.calls.count
             fixture.failPorts = false; fixture.masVersion = "7.1.0"
             let retried = await fixture.service().prepare(retrying: first)

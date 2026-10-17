@@ -21,7 +21,7 @@ private final class SetupRunner: CommandRunning {
             return CommandResult(status: action == "ports-update" && failPorts ? 1 : 0, errorOutput: "Controlled source failure")
         }
         if arguments == ["--version"] { return CommandResult(output: "Homebrew 7.0.9") }
-        if arguments == ["version"] { return CommandResult(output: executable == "/opt/homebrew/bin/mas" ? masVersion : "7.0.0") }
+        if arguments == ["version"] { return CommandResult(output: executable == "/opt/homebrew/bin/mas" ? masVersion : "Version: 2.12.7") }
         if arguments == ["list", "--formula", "--versions", "mas"] { return CommandResult(output: "mas 7.0.0") }
         if arguments.first == "info" || arguments.first == "outdated" && arguments.contains("--cask") {
             return CommandResult(output: #"{"casks":[]}"#)

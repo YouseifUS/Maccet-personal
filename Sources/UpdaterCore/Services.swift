@@ -28,7 +28,8 @@ public struct ScanService {
             }
             var health = SourceHealth(source: source, executable: executable, available: true, message: "Available", checkRequired: true)
             do {
-                health.version = String(try await runner.run(executable, source.versionArguments, environment: ["HOMEBREW_NO_AUTO_UPDATE": "1"], timeout: 15).checked().split(whereSeparator: \.isNewline).first ?? "")
+                let output = try await runner.run(executable, source.versionArguments, environment: ["HOMEBREW_NO_AUTO_UPDATE": "1"], timeout: 15).checked()
+                health.version = try SourceToolVersion.validated(output, source: source)
                 let records: [AppRecord]
                 if source == .homebrew {
                     records = try await HomebrewAdapter(executable: executable, runner: runner, cacheRoot: cacheRoot).check(apps: updateInventory)
@@ -37,8 +38,6 @@ public struct ScanService {
                     records = try await MacPortsAdapter(executable: executable, runner: runner).check(apps: updateInventory)
                     health.message = "Installed-file ownership checked against the local ports index. Choose Prepare Sources in Sources to refresh a stale index."
                 } else {
-                    let major = Int(health.version.split(separator: ".").first ?? "0") ?? 0
-                    guard major >= 7 else { throw UpdaterError("mas 7 or later is required for identity-based matching. Retry source setup or use App Store.") }
                     records = try await AppStoreAdapter(executable: executable, runner: runner).check(apps: updateInventory)
                     health.message = "Receipt, bundle identity, and installed path matched. Apple's lookup may lag store availability."
                 }

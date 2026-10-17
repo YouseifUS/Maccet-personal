@@ -18,7 +18,9 @@ For example, a verified Homebrew route and a verified MacPorts route can both be
 
 This release aggregates **installed-manager ownership results**, not the entire public catalogs of every manager. A matching catalog name cannot take over an existing application. Cross-catalog discovery and reviewed ownership transfer remain separate work.
 
-Every GUI launch checks readiness of the applicable enabled source tools before checking applications. Missing tools appear as **Unavailable**; launch does not install tools, refresh their indexes, or request administrator authorization. A working App Store helper is checked directly during launch; its package manager and Apple developer tools are required only when the chosen maintenance action needs them. Missing or broken helpers still require attention.
+Every GUI launch checks readiness of the applicable enabled source tools before checking applications. Missing tools appear as **Unavailable**; launch does not install tools, refresh their indexes, or request administrator authorization. Readiness and source scans require recognized stable version output, with validated numeric versions stored separately from diagnostic text. The Homebrew 6 baseline includes [the scoped `--no-quit` upgrade option](https://github.com/Homebrew/brew/blob/6.0.0/Library/Homebrew/cmd/upgrade.rb). MacPorts 2.8.1 is the conservative [command-format baseline](https://github.com/macports/macports-base/blob/v2.8.1/src/port/port.tcl); mas 7 supplies identity/path-aware store checking. These minimums do not certify every operating-system and architecture combination. Unknown output and unsupported older versions require preparation or a manual tool update.
+
+A working App Store helper is checked directly during launch; its package manager and Apple developer tools are required only when the chosen maintenance action needs them. Missing or broken helpers still require attention.
 
 Choose **Sources → Prepare Sources** to install missing tools and maintain required sources. Partial preparation failures offer **Retry Setup**, while available sources can still check apps. See [source readiness and preparation](docs/STARTUP_SETUP.md) for prerequisites, authorization, and platform limitations.
 
@@ -49,10 +51,12 @@ Installing a manager does not make it the owner of existing direct-download appl
 ## Requirements
 
 - macOS 13 or later is the deployment target. See [validation notes](docs/VALIDATION.md) for what was actually exercised.
-- Homebrew in `/opt/homebrew/bin/brew` or `/usr/local/bin/brew` for managed casks.
-- MacPorts at `/opt/local/bin/port` for MacPorts-managed apps.
+- Homebrew 6+ in `/opt/homebrew/bin/brew` or `/usr/local/bin/brew` for managed casks.
+- MacPorts 2.8.1+ at `/opt/local/bin/port` for MacPorts-managed apps.
 - `mas` 7+ under `/opt/homebrew/bin`, `/usr/local/bin`, or `/opt/local/bin` for identity-based store checks.
 - A suitable App Store account and any required macOS authorization for store updates.
+
+Readiness and source scans require recognized stable version output, with validated numeric versions stored separately from diagnostic text. The Homebrew 6 baseline includes [the scoped `--no-quit` upgrade option](https://github.com/Homebrew/brew/blob/6.0.0/Library/Homebrew/cmd/upgrade.rb). MacPorts 2.8.1 is the conservative [command-format baseline](https://github.com/macports/macports-base/blob/v2.8.1/src/port/port.tcl); mas 7 supplies identity/path-aware store checking. These minimums do not certify every operating-system and architecture combination. Unknown output and unsupported older versions require preparation or a manual tool update.
 
 A working App Store helper is checked directly during launch; its package manager and Apple developer tools are required only when the chosen maintenance action needs them. Missing or broken helpers still require attention.
 

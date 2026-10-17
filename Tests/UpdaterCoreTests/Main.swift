@@ -20,6 +20,13 @@ private final class FakeRunner: CommandRunning {
         calls.append(call); return try handler(call)
     }
 }
+private actor InstallBarrier {
+    var entered = false
+    var released = false
+    func enter() { entered = true }
+    func release() { released = true }
+}
+
 private struct Fixture {
     let root: URL
     let appURL: URL
@@ -153,6 +160,29 @@ private enum Checks {
                 print(String(mode.intValue & 0o777, radix: 8))
             }
             return
+        }
+        if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--hold-update-lock" {
+            do {
+                let app = try AppInventory().read(CommandLine.arguments[2])
+                let cask: [String: Any] = ["token": "example", "version": "2.0", "sha256": String(repeating: "a", count: 64), "installed": "1.0", "artifacts": [["app": ["Example.app"], "target": app.path]]]
+                let metadata = String(decoding: try JSONSerialization.data(withJSONObject: ["casks": [cask]]), as: UTF8.self)
+                let runner = FakeRunner { call in
+                    if call.args.first == "info" { return CommandResult(output: metadata) }
+                    if call.args.first == "outdated" { return CommandResult(output: #"{"casks":[{"name":"example"}]}"#) }
+                    if call.args.first == "upgrade" {
+                        try Data("owned".utf8).write(to: URL(fileURLWithPath: CommandLine.arguments[3]))
+                        // The parent deliberately terminates this process to prove
+                        // kernel ownership is released after abnormal interruption.
+                        while true { Thread.sleep(forTimeInterval: 0.1) }
+                    }
+                    throw UpdaterError("Unexpected child command")
+                }
+                let candidate = HomebrewAdapter.apply(casks: try HomebrewAdapter.parseCasks(metadata), outdated: ["example"], to: [app], executable: "/usr/bin/true")[0]
+                let cache = URL(fileURLWithPath: app.path).deletingLastPathComponent().appendingPathComponent("ChildCache")
+                _ = await UpdateEngine(runner: runner, cacheRoot: cache, sourcePaths: [.homebrew: "/usr/bin/true"])
+                    .execute(PlannedUpdate(app: candidate, preview: ""), cleanup: false) { _, _ in }
+            } catch { }
+            exit(3)
         }
         var passed = 0
         var failures: [String] = []
@@ -377,6 +407,70 @@ private enum Checks {
             try expect(result.state == .failed && result.message.contains("signature") && runner.calls.isEmpty)
             do { _ = try await engine.prepare([try fixture.candidate()], preferences: Preferences()); throw CheckFailure(description: "Invalid signature allowed review") }
             catch is UpdaterError { }
+        }
+        await check("Concurrent engines defer a duplicate app while unrelated updates remain independent") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let other = try Fixture(); defer { other.clean() }
+            let firstRunner = try fixture.runner { try fixture.write(version: "2.0", build: "20") }
+            let secondRunner = try fixture.runner { try fixture.write(version: "2.0", build: "20") }
+            let otherRunner = try other.runner { try other.write(version: "2.0", build: "20") }
+            let plan = PlannedUpdate(app: try fixture.candidate(), preview: "")
+            let barrier = InstallBarrier()
+            let first = Task {
+                await UpdateEngine(runner: firstRunner, cacheRoot: fixture.root.appendingPathComponent("FirstCache"), sourcePaths: [.homebrew: "/usr/bin/true"])
+                    .execute(plan, cleanup: true) { state, _ in
+                        if state == .installing {
+                            await barrier.enter()
+                            while !(await barrier.released) { try await Task.sleep(nanoseconds: 10_000_000) }
+                        }
+                    }
+            }
+            for _ in 0..<500 {
+                if await barrier.entered { break }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            let duplicate = await UpdateEngine(runner: secondRunner, cacheRoot: fixture.root.appendingPathComponent("SecondCache"), sourcePaths: [.homebrew: "/usr/bin/true"])
+                .execute(plan, cleanup: true) { _, _ in }
+            let independent = await UpdateEngine(runner: otherRunner, cacheRoot: other.root.appendingPathComponent("Cache"), sourcePaths: [.homebrew: "/usr/bin/true"])
+                .execute(PlannedUpdate(app: try other.candidate(), preview: ""), cleanup: true) { _, _ in }
+            await barrier.release()
+            let owned = await first.value
+            try expect(owned.state == .succeeded && duplicate.state == .deferred && independent.state == .succeeded)
+            try expect(secondRunner.calls.isEmpty, "Duplicate attempt ran source commands")
+            try expect(!FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent("SecondCache").path))
+        }
+        await check("Separate processes share ownership and a killed owner cannot leave a stale lock") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let ready = fixture.root.appendingPathComponent("OwnerReady")
+            let child = Process()
+            child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+            child.arguments = ["--hold-update-lock", fixture.appURL.path, ready.path]
+            child.standardOutput = FileHandle.nullDevice; child.standardError = FileHandle.nullDevice
+            try child.run()
+            defer { if child.isRunning { kill(child.processIdentifier, SIGKILL) }; child.waitUntilExit() }
+            for _ in 0..<500 {
+                if FileManager.default.fileExists(atPath: ready.path) || !child.isRunning { break }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            try expect(FileManager.default.fileExists(atPath: ready.path), "Child did not reach its intercepted installer")
+            let runner = try fixture.runner { try fixture.write(version: "2.0", build: "20") }
+            let engine = UpdateEngine(runner: runner, cacheRoot: fixture.root.appendingPathComponent("ParentCache"), sourcePaths: [.homebrew: "/usr/bin/true"])
+            let plan = PlannedUpdate(app: try fixture.candidate(), preview: "")
+            let duplicate = await engine.execute(plan, cleanup: true) { _, _ in }
+            kill(child.processIdentifier, SIGKILL); child.waitUntilExit()
+            try expect(duplicate.state == .deferred && runner.calls.isEmpty, "Separate process allowed a conflicting installer")
+            let retried = await engine.execute(plan, cleanup: true) { _, _ in }
+            try expect(retried.state == .succeeded, retried.message)
+        }
+        await check("Ownership releases after cancellation and an independent explicit retry can run") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let runner = try fixture.runner { try fixture.write(version: "2.0", build: "20") }
+            let engine = UpdateEngine(runner: runner, cacheRoot: fixture.root.appendingPathComponent("Cache"), sourcePaths: [.homebrew: "/usr/bin/true"])
+            let plan = PlannedUpdate(app: try fixture.candidate(), preview: "")
+            let canceled = await engine.execute(plan, cleanup: true) { _, _ in throw CancellationError() }
+            try expect(canceled.state == .canceled && runner.calls.isEmpty)
+            let retried = await engine.execute(plan, cleanup: true) { _, _ in }
+            try expect(retried.state == .succeeded, retried.message)
         }
         await check("Reviewed updates execute only the named cask and clean only after verification") {
             let fixture = try Fixture(); defer { fixture.clean() }

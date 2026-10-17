@@ -124,6 +124,13 @@ public struct UpdateEngine {
         var record = ActivityRecord(app: app, state: .preflight, message: "Revalidating identity and target release.")
         var ownedCache: OwnedUpdateCache?
         do {
+            guard let ownership = try ApplicationUpdateOwnership.acquire(for: app.path) else {
+                record.state = .deferred
+                record.message = "Another Maccet operation owns this application. Wait for it to finish, then rescan and review a new plan."
+                record.cleanupMessage = "No installation or cleanup was performed for this attempt."
+                return record
+            }
+            defer { ownership.release() }
             try await onStage(.preflight, record.message)
             try plan.reviewedSignature.validate(at: app.path)
             _ = try await revalidate(app)

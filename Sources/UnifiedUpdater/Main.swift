@@ -23,7 +23,10 @@ enum Entry {
     private static func diagnostics() async {
         if CommandLine.arguments.contains("--check-startup-script") {
             do {
-                _ = try await ProcessRunner().run("/bin/bash", ["-n", DependencySetup.scriptURL.path]).checked()
+                guard let script = DependencySetup.packagedScriptURL else {
+                    throw UpdaterError("Packaged startup script is missing.")
+                }
+                _ = try await ProcessRunner().run("/bin/bash", ["-n", script.path]).checked()
                 print("Bundled startup script is available and has valid syntax.")
             } catch { FileHandle.standardError.write(Data((error.localizedDescription + "\n").utf8)); exit(1) }
             return

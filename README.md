@@ -156,6 +156,8 @@ The minimum tools version in the manifest is Swift 5.9. Testing older compiler/S
 
 ## Checks and read-only diagnostics
 
+The [platform validation workflow](docs/PLATFORM-VALIDATION.md) runs controlled checks and extracted-package validation on explicit Intel/Apple Silicon runner combinations. Actual Actions results and environment logs define the exercised matrix; the macOS 13 deployment target does not certify all supported systems.
+
 ```bash
 # Dependency-free Swift check suite; no real app updates are performed.
 bash scripts/test.sh

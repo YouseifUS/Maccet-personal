@@ -752,6 +752,42 @@ private enum Checks {
             let plan = try await engine.prepare(result.apps, preferences: prefs)
             try expect(plan.count == 1 && runner.calls.allSatisfy { $0.executable == "/usr/bin/true" })
         }
+        await check("App Store authorization forwards the invoking user and group") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            var app = try fixture.app(); app.packageID = "123456789"
+            let runner = FakeRunner { _ in CommandResult() }
+            try await AppStoreAdapter(executable: "/opt/homebrew/bin/mas", runner: runner).upgrade(app)
+            try expect(runner.calls.count == 1 && runner.calls[0].executable == "/usr/bin/osascript")
+            let call = runner.calls[0]
+            let script = call.args.last ?? ""
+            try expect(script.contains("/usr/bin/env SUDO_UID=\(getuid()) SUDO_GID=\(getgid()) '"))
+            try expect(script.contains("/opt/homebrew/bin/mas' update --inaccurate --check-min-os 123456789"))
+            try expect(script.hasSuffix("with administrator privileges") && call.timeout == nil)
+            app.packageID = "123456789;whoami"
+            do { try await AppStoreAdapter(executable: "/opt/homebrew/bin/mas", runner: runner).upgrade(app); throw CheckFailure(description: "Expected invalid ID rejection") }
+            catch is UpdaterError { }
+            try expect(runner.calls.count == 1)
+        }
+        await check("App Store context validation and authorization cancellation fail safely") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            var app = try fixture.app(); app.packageID = "123456789"
+            let runner = FakeRunner { _ in CommandResult(status: 1, errorOutput: "User canceled. (-128)") }
+            for path in ["/opt/homebrew/bin/mas", "/usr/local/bin/mas", "/opt/local/bin/mas"] {
+                do {
+                    try await AppStoreAdapter(executable: path, runner: runner, invokingUser: { (501, 20) }).upgrade(app)
+                    throw CheckFailure(description: "Canceled authorization succeeded")
+                } catch let error as UpdaterError { try expect(error.message.contains("User canceled")) }
+                try expect(runner.calls.last?.args.last?.contains("SUDO_UID=501 SUDO_GID=20 '") == true)
+            }
+            let count = runner.calls.count
+            for (path, uid) in [("/opt/homebrew/bin/mas", uid_t(0)), ("/tmp/mas", uid_t(501))] {
+                do {
+                    try await AppStoreAdapter(executable: path, runner: runner, invokingUser: { (uid, 20) }).upgrade(app)
+                    throw CheckFailure(description: "Unsafe context reached authorization")
+                } catch is UpdaterError { }
+            }
+            try expect(runner.calls.count == count)
+        }
         await check("MacPorts mutation uses one named package and preserves other source caches") {
             let fixture = try Fixture(); defer { fixture.clean() }
             var app = try fixture.candidate(); app.source = .macPorts

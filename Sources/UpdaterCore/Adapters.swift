@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public enum ToolLocator {
     public static func find(_ name: String) -> String? {
@@ -177,7 +178,11 @@ public struct StoreUpdate: Equatable {
 public struct AppStoreAdapter {
     public let executable: String
     public let runner: any CommandRunning
-    public init(executable: String, runner: any CommandRunning) { self.executable = executable; self.runner = runner }
+    private let invokingUser: () -> (userID: uid_t, groupID: gid_t)
+    public init(executable: String, runner: any CommandRunning,
+                invokingUser: @escaping () -> (userID: uid_t, groupID: gid_t) = { (getuid(), getgid()) }) {
+        self.executable = executable; self.runner = runner; self.invokingUser = invokingUser
+    }
     public func command(_ args: [String]) async throws -> String {
         try await runner.run(executable, args, environment: [:], timeout: 90).checked()
     }
@@ -245,8 +250,12 @@ public struct AppStoreAdapter {
         guard let id = app.packageID else { throw UpdaterError("Missing App Store identity.") }
         try ToolLocator.validateStoreID(id)
         guard ["/opt/homebrew/bin/mas", "/usr/local/bin/mas", "/opt/local/bin/mas"].contains(executable) else { throw UpdaterError("Unrecognized mas executable location.") }
-        // Only a fixed executable and validated numeric ID enter the privileged shell.
-        let shellCommand = "'" + executable + "' update --inaccurate --check-min-os " + id
+        // Read the real process identity before authorization. Inherited SUDO_*
+        // environment values are not evidence of the user requesting this update.
+        let user = invokingUser()
+        guard user.userID != 0 else { throw UpdaterError("Run Maccet as your regular user before updating App Store applications.") }
+        // Only fixed paths and validated numeric values enter the privileged shell.
+        let shellCommand = "/usr/bin/env SUDO_UID=\(user.userID) SUDO_GID=\(user.groupID) '" + executable + "' update --inaccurate --check-min-os " + id
         let script = "do shell script \"" + shellCommand + "\" with administrator privileges"
         _ = try await runner.run("/usr/bin/osascript", ["-e", script], environment: [:], timeout: nil).checked()
     }

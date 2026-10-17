@@ -18,6 +18,23 @@ public struct CommandResult {
 
 public protocol CommandRunning {
     func run(_ executable: String, _ arguments: [String], environment: [String: String], timeout: TimeInterval?) async throws -> CommandResult
+    func runObserved(_ executable: String, _ arguments: [String], environment: [String: String], timeout: TimeInterval?,
+                     onObservation: @escaping (ProcessObservation) async -> Void) async throws -> CommandResult
+}
+public extension CommandRunning {
+    func runObserved(_ executable: String, _ arguments: [String], environment: [String: String], timeout: TimeInterval?,
+                     onObservation: @escaping (ProcessObservation) async -> Void) async throws -> CommandResult {
+        await onObservation(ProcessObservation(processID: nil, elapsedSeconds: 0, silentSeconds: 0, stdoutBytes: 0, stderrBytes: 0, isRunning: true))
+        let started = ProcessInfo.processInfo.systemUptime
+        do {
+            let result = try await run(executable, arguments, environment: environment, timeout: timeout)
+            await onObservation(ProcessObservation(processID: nil, elapsedSeconds: ProcessInfo.processInfo.systemUptime - started, silentSeconds: 0, stdoutBytes: 0, stderrBytes: 0, isRunning: false))
+            return result
+        } catch {
+            await onObservation(ProcessObservation(processID: nil, elapsedSeconds: ProcessInfo.processInfo.systemUptime - started, silentSeconds: 0, stdoutBytes: 0, stderrBytes: 0, isRunning: false))
+            throw error
+        }
+    }
 }
 
 /// Each stream is drained independently; only its first 16 MiB are retained.
@@ -29,6 +46,8 @@ private final class BoundedProcessOutput {
     private let queue = DispatchQueue(label: "maccet.process-output." + UUID().uuidString)
     private var source: DispatchSourceRead?
     private var data = Data()
+    private var receivedBytes: UInt64 = 0
+    var observedBytes: UInt64 { queue.sync { receivedBytes } }
     private var exceeded = false
     private var failed = false
     private var storing = true
@@ -75,6 +94,7 @@ private final class BoundedProcessOutput {
         while remainingBudget > 0 {
             let count = buffer.withUnsafeMutableBytes { Darwin.read(pipe.fileHandleForReading.fileDescriptor, $0.baseAddress, min($0.count, remainingBudget)) }
             if count > 0 {
+                receivedBytes += UInt64(count)
                 remainingBudget -= count
                 if storing {
                     let remaining = limit - data.count
@@ -100,8 +120,34 @@ private final class BoundedProcessOutput {
 }
 
 public final class ProcessRunner: CommandRunning {
+    private var observationInterval: UInt64 = 1_000_000_000
     public init() {}
+    @_spi(Testing) public init(observationInterval: UInt64) { self.observationInterval = max(1_000_000, observationInterval) }
+    public func runObserved(_ executable: String, _ arguments: [String], environment: [String: String], timeout: TimeInterval?,
+                            onObservation: @escaping (ProcessObservation) async -> Void) async throws -> CommandResult {
+        let monitor = OwnedProcessMonitor()
+        let interval = observationInterval
+        let observer = Task {
+            while !Task.isCancelled {
+                if let snapshot = monitor.snapshot() { await onObservation(snapshot) }
+                do { try await Task.sleep(nanoseconds: interval) } catch { break }
+            }
+        }
+        do {
+            let result = try await runCaptured(executable, arguments, environment: environment, timeout: timeout, monitor: monitor)
+            observer.cancel(); await observer.value
+            if let snapshot = monitor.snapshot() { await onObservation(snapshot) }
+            return result
+        } catch {
+            observer.cancel(); await observer.value
+            if let snapshot = monitor.snapshot() { await onObservation(snapshot) }
+            throw error
+        }
+    }
     public func run(_ executable: String, _ arguments: [String], environment: [String: String] = [:], timeout: TimeInterval? = 120) async throws -> CommandResult {
+        try await runCaptured(executable, arguments, environment: environment, timeout: timeout, monitor: nil)
+    }
+    private func runCaptured(_ executable: String, _ arguments: [String], environment: [String: String], timeout: TimeInterval?, monitor: OwnedProcessMonitor?) async throws -> CommandResult {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
@@ -124,6 +170,7 @@ public final class ProcessRunner: CommandRunning {
                     let deadline = timeout.map { Date().addingTimeInterval($0) }
                     var timedOut = false
                     while process.isRunning {
+                        monitor?.update(processID: process.processIdentifier, stdout: out.observedBytes, stderr: err.observedBytes, isRunning: true)
                         if let deadline, Date() > deadline {
                             timedOut = true
                             process.terminate()
@@ -134,9 +181,11 @@ public final class ProcessRunner: CommandRunning {
                         Thread.sleep(forTimeInterval: 0.1)
                     }
                     process.waitUntilExit()
+                    monitor?.update(processID: process.processIdentifier, stdout: out.observedBytes, stderr: err.observedBytes, isRunning: false)
                     if timedOut { throw UpdaterError("The source did not respond before the check timed out. Try again or open the source directly.") }
                     let stdout = out.finish()
                     let stderr = err.finish()
+                    monitor?.update(processID: process.processIdentifier, stdout: out.observedBytes, stderr: err.observedBytes, isRunning: false)
                     guard !stdout.failed && !stderr.failed else { throw UpdaterError("Process output could not be captured completely; this result was not parsed.") }
                     guard !stdout.exceeded && !stderr.exceeded else {
                         let context = stderr.data.isEmpty ? stdout.data : stderr.data

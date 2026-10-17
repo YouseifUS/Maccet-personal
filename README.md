@@ -16,7 +16,7 @@ Each adapter checks independently. Its evidence-backed routes are collected unde
 
 For example, a verified Homebrew route and a verified MacPorts route can both belong to one app. Choosing MacPorts means only MacPorts receives the install request for that app. Other applications in the same batch can use a different manager. An App Store receipt preserves store ownership.
 
-This release aggregates **installed-manager ownership results**, not the entire public catalogs of every manager. A matching catalog name cannot take over an existing application. Cross-catalog discovery and reviewed ownership transfer remain separate work.
+This release aggregates **installed-manager ownership results**, not the entire public catalogs of every manager. A matching catalog name cannot take over an existing application. Optional authenticated discovery catalogs can suggest sources without transferring ownership; reviewed ownership transfer remains separate work.
 
 Every GUI launch checks readiness of the applicable enabled source tools before checking applications. Missing tools appear as **Unavailable**; launch does not install tools, refresh their indexes, or request administrator authorization. Readiness and source scans require recognized stable version output, with validated numeric versions stored separately from diagnostic text. The Homebrew 6 baseline includes [the scoped `--no-quit` upgrade option](https://github.com/Homebrew/brew/blob/6.0.0/Library/Homebrew/cmd/upgrade.rb). MacPorts 2.8.1 is the conservative [command-format baseline](https://github.com/macports/macports-base/blob/v2.8.1/src/port/port.tcl); mas 7 supplies identity/path-aware store checking. These minimums do not certify every operating-system and architecture combination. Unknown output and unsupported older versions require preparation or a manual tool update.
 
@@ -94,11 +94,25 @@ Explicit source preparation installs or updates the source tools themselves, inc
 | Sources | Separate metadata requests and tool preparation, per-source results, retry, canonical paths, versions, errors, scan controls, and documentation |
 | Settings | Application folders, exclusion reset, and privacy/behavior information |
 
+Use **Navigate → Command-1…Command-7** for the seven pages and **Command-F** to focus application search. Escape clears a search query or closes a review/details sheet. See [keyboard/accessibility validation and limits](docs/ACCESSIBILITY-VALIDATION-2026-10-18.md).
+
 Right-click an app for details, Reveal in Finder, Ignore App, or Skip This Release. **Show ignored** reveals excluded entries; **Settings → Reset All Exclusions** restores them.
+
+## Official vendor-assisted checks
+
+Enable **Sources → Check supported vendor releases** for the first supported vendor family, Google Chrome. Maccet requires an exact supported bundle, the pinned Google Developer ID requirement, a supported executable architecture and a per-copy channel confirmation in Details. It reads Google's official VersionHistory release metadata and offers a guided review for a newer served release.
+
+**Review Assisted Update** refreshes the target, then records a handoff and opens Google's instructions on request. Complete the update in Chrome, close that copy and use **Activity → Verify Reviewed Result**. Vendor-assisted records remain separate from automatic attempts and are included in exported reports. No vendor installer, policy change or cleanup command runs. Published release metadata cannot establish machine-specific rollout, management policy or compatibility; Chrome remains responsible for those decisions. See [the supported family and verification boundary](docs/OFFICIAL-VENDOR-UPDATES.md).
+
+## Optional Sparkle feed checks
+
+Enable **Sources → Check embedded Sparkle feeds** to check applications without a manager route or App Store receipt. The setting is off until selected. Compatible numeric releases appear as read-only feed observations; available updates require the application's own updater. Maccet never downloads an enclosure or grants a Sparkle result automatic-installation eligibility.
+
+Requests reject redirects and use HTTPS, private ephemeral sessions, a 1 MiB response cap and request/resource time limits. A scan starts at most 16 requests within a 30-second start budget; omitted feeds remain unchecked. Results cover the embedded feed's default channel, with runtime overrides explicitly unobserved. See [scope, limits and verification](docs/SPARKLE-CHECKS.md).
 
 ## Source-mapping trust foundation
 
-The core defines versioned identity/channel/domain/capability evidence and authenticates supplied catalogs with client-pinned Ed25519 keys, revision/expiry checks and a retained known-good cache. Catalog evidence alone cannot authorize automatic installation. See [the wire format and trust boundary](docs/SOURCE-MAPPING-TRUST.md). No production publisher key or remote catalog endpoint is configured; broad discovery remains separate work.
+The core defines versioned identity/channel/domain/capability evidence and authenticates supplied catalogs with client-pinned Ed25519 keys, revision/expiry checks and a retained known-good cache. Catalog evidence alone cannot authorize automatic installation. See [the wire format and trust boundary](docs/SOURCE-MAPPING-TRUST.md). No default production publisher key or catalog endpoint is configured. **Sources → Configure Publisher** can pin a publisher you independently trust; **Refresh Discovery Catalog** fetches an authenticated, dated catalog. Ordinary scans use its unexpired cache and present identity/channel candidates in Details, without granting ownership, checked-release coverage or installation permission. See [discovery configuration and cache policy](docs/DISCOVERY-CATALOG.md).
 
 ## Update and cleanup behavior
 
@@ -112,7 +126,9 @@ The first alpha supports automatic updates for simple, specifically versioned ap
 
 Update review captures code-signature evidence. Signed applications must pass strict resource, nested-code and architecture validation before installation and after the target metadata matches. Certificate-signed replacements must satisfy the reviewed designated requirement, signing identifier and team identity. Ad-hoc signatures establish integrity and a signing identifier, without certifying a publisher. Applications already unsigned at review remain supported without a publisher-authenticity claim; a newly signed replacement must validate. Invalid signatures or changed reviewed signing identities prevent success and retain the attempt's artifacts. These are point-in-time checks, not a guarantee against concurrent external changes or a substitute for Gatekeeper/notarization.
 
-App Store operations use a fixed `mas` executable and validated numeric store ID. The app does not collect or store your Apple Account or administrator password. If a store operation fails, open App Store from the app row and resolve the issue there.
+App Store operations use a fixed `mas` executable and validated numeric store ID. The app does not collect or store your Apple Account or administrator password. App Store installations publish owned-command elapsed time and output observations. After two minutes without observed output, Activity shows **Needs attention** and offers the official App Store handoff. Silence does not establish a stall, and the active installer is allowed to finish. **Cancel Remaining** still affects only queued work.
+
+After an automatic App Store attempt fails and the queue settles, use **Activity → Open App Store**, complete the update there, then choose **Verify Assisted Result**. Verification rechecks the reviewed path, bundle/receipt, target metadata and code signature while holding per-app ownership. The assisted observation is saved separately; the original automatic failure and attention evidence remain visible, and no cleanup runs. Verification uses reviews retained in the current session; after relaunch, rescan and review again. See [long-running store operations](docs/APP-STORE-ATTENTION.md) for evidence limits.
 
 For Homebrew, each update attempt gets a separate cache folder under this app's local data directory. After the reviewed target is verified, only that attempt's download and temporary-log files are eligible for automatic removal. Cleanup retains the directory structure and ownership marker, so a late directory-name swap cannot redirect recursive deletion. Failed or unverified attempts retain their artifacts. Disabling cleanup retains successful-attempt files too.
 
@@ -134,9 +150,13 @@ open 'dist/Maccet.app'
 
 The build script creates the release executable, application bundle, generated icon, and a ZIP archive in `dist/`. It signs the local app with an ad-hoc signature. The app is **not Developer ID signed or notarized**, and this alpha is not a public distribution release. Developer ID signing and notarization require the owner's signing configuration and remain a separate release step.
 
+An optional owner-operated Developer ID workflow is available through `bash scripts/release.sh`. It requires a real signing identity, expected team and an existing notarytool Keychain profile. It publishes a separate distribution directory only after Developer ID/runtime/timestamp, accepted notarization, stapling, Gatekeeper and extracted-artifact checks pass. No Developer ID/notarized deliverable is claimed by the workflow's controlled tests. See [distribution configuration and acceptance](docs/DISTRIBUTION.md).
+
 The minimum tools version in the manifest is Swift 5.9. Testing older compiler/SDK combinations remains part of the wider support matrix; the validation document names the toolchain used for this build.
 
 ## Checks and read-only diagnostics
+
+The [platform validation workflow](docs/PLATFORM-VALIDATION.md) runs controlled checks and extracted-package validation on explicit Intel/Apple Silicon runner combinations. Actual Actions results and environment logs define the exercised matrix; the macOS 13 deployment target does not certify all supported systems.
 
 ```bash
 # Dependency-free Swift check suite; no real app updates are performed.
@@ -193,8 +213,8 @@ CHANGELOG.md
 
 ## Known alpha limitations
 
-- No universal app coverage. Unmanaged direct-download apps remain unchecked.
-- Sparkle feed presence is detected, but feeds are not checked or used to install updates.
+- No universal app coverage. Unmapped direct-download apps remain unchecked; optional vendor and embedded-feed observations cover only their documented subsets.
+- Optional Sparkle checks observe numeric default-channel releases from embedded HTTPS feeds. Runtime overrides, custom version comparators, signed appcasts and complex major-upgrade rules require the application’s built-in updater; Maccet does not install Sparkle updates.
 - Homebrew and MacPorts are implemented. Nix, pkgsrc/pkgin, developer package updates, app adoption, scheduling, and notifications remain future work.
 - MacPorts is tested with controlled fixtures against its documented command formats; it is not installed on the validation machine, so real MacPorts upgrades remain unverified.
 - macOS and source-tool combinations beyond those in the validation notes are not certified.
@@ -209,4 +229,4 @@ CHANGELOG.md
 
 ## Next releases
 
-Current development version: **0.1.2**. Next priorities: cross-catalog discovery with verified identity mappings, Nix profile-aware routing, pkgsrc/pkgin, broader real-device validation, and reviewed source adoption. Sparkle and vendor endpoints can further cover apps not owned by a package manager. See the product specification for the broader roadmap.
+Current development version: **0.1.2**. Next priorities: production reviewed catalogs, source-specific release checks, Nix profile-aware routing, pkgsrc/pkgin, broader real-device validation, and reviewed source adoption. Additional Sparkle and vendor families can further cover apps not owned by a package manager. See the product specification for the broader roadmap.

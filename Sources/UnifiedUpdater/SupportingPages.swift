@@ -56,6 +56,7 @@ struct SourcesPage: View {
     @EnvironmentObject var model: AppModel
     @ViewState private var showSteps = true
     @ViewState private var showMetadata = true
+    @ViewState private var showingDiscoveryConfiguration = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -102,6 +103,42 @@ struct SourcesPage: View {
                         DisclosureGroup("Readiness and preparation results", isExpanded: $showSteps) { SetupSteps() }
                     }
                 }
+                Surface {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle("Check embedded Sparkle feeds", isOn: Binding(get: { model.preferences.checkEmbeddedSparkleFeeds == true }, set: { enabled in
+                            model.preferences.checkEmbeddedSparkleFeeds = enabled
+                            model.savePreferences(); model.invalidateInventory()
+                        })).toggleStyle(.switch).disabled(model.busy)
+                        Text("Read release metadata from an application's embedded HTTPS feed when no manager claims it. Default-channel numeric releases are checked; runtime overrides may differ. Updates must be confirmed and installed with the application's own updater.")
+                            .font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Surface {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Source discovery catalog").font(.system(size: 15, weight: .semibold))
+                            Spacer()
+                            Button("Configure Publisher") { showingDiscoveryConfiguration = true }.disabled(model.busy)
+                            Button("Refresh Discovery Catalog", action: model.refreshDiscovery).disabled(model.busy || model.preferences.discoveryCatalog == nil)
+                        }
+                        Text(model.discoveryStatus.message).font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                        if let error = model.discoveryStatus.error { Text("Last refresh failed: " + error).font(.system(size: 12)).foregroundStyle(StatusTone.failure.foreground).fixedSize(horizontal: false, vertical: true) }
+                        if let fetched = model.discoveryStatus.lastSuccess { Text("Last fetched: \(fetched.formatted(date: .abbreviated, time: .shortened))").font(.system(size: 12)).foregroundStyle(Maccet.secondary) }
+                        if let revision = model.discoveryStatus.revision { Text("Catalog revision \(revision)").font(.system(size: 12)) }
+                        if let expiry = model.discoveryStatus.expiresAt { Text("Expires: \(expiry.formatted(date: .abbreviated, time: .shortened))").font(.system(size: 12)).foregroundStyle(Maccet.secondary) }
+                        Text("A configured publisher can suggest sources beyond installed managers. Candidates do not establish ownership, checked-release coverage or installation permission. Scans reuse only an authenticated, unexpired cache.")
+                            .font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Surface {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle("Check supported vendor releases", isOn: Binding(get: { model.preferences.checkOfficialVendorReleases == true }, set: { enabled in
+                            model.preferences.checkOfficialVendorReleases = enabled; model.savePreferences(); model.invalidateInventory()
+                        })).toggleStyle(.switch).disabled(model.busy)
+                        Text("Checks Google Chrome using official release information when no manager claims it. Confirm each copy's channel in Details. Complete the update in Chrome, then verify the reviewed result; Maccet does not install vendor updates.")
+                            .font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 ForEach(model.sources) { source in SourceCard(source: source) }
                 Text("These switches control checks and future source preparation. A disabled manager may still be needed for the enabled App Store helper.").font(.system(size: 12, weight: .medium)).foregroundStyle(Maccet.secondary)
                 if !model.warnings.isEmpty {
@@ -114,7 +151,7 @@ struct SourcesPage: View {
                 }
                 Text("Each installed copy uses one verified manager. Choose between conflicting routes in the application's Details.").font(.system(size: 12)).foregroundStyle(Maccet.secondary)
             }.padding(.horizontal, 28).padding(.bottom, 28)
-        }
+        }.sheet(isPresented: $showingDiscoveryConfiguration) { DiscoveryCatalogSheet() }
     }
 }
 private struct SourceCard: View {
@@ -163,7 +200,7 @@ private struct SourceCard: View {
 
 struct ActivityPage: View {
     @EnvironmentObject var model: AppModel
-    private var current: ActivityRecord? { model.history.first { [.preflight, .installing, .verifying].contains($0.state) } ?? model.history.last { $0.state == .queued } }
+    private var current: ActivityRecord? { model.history.first { [.preflight, .installing, .needsAttention, .verifying].contains($0.state) } ?? model.history.last { $0.state == .queued } }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -192,16 +229,38 @@ struct ActivityPage: View {
                         }
                     }
                 }
-                if model.history.isEmpty {
+                if model.history.isEmpty && model.vendorHistory.isEmpty {
                     EmptyState(symbol: "clock.arrow.circlepath", title: "No update attempts yet", message: "Your update history will appear here, including verification results and any interrupted attempts.").frame(minHeight: 340)
                 } else {
-                    Text("Update history").font(.system(size: 15, weight: .semibold))
+                    if !model.history.isEmpty { Text("Automatic update history").font(.system(size: 15, weight: .semibold)) }
                     ForEach(model.history) { entry in HistoryCard(entry: entry) }
+                }
+                if !model.vendorHistory.isEmpty {
+                    Text("Vendor-assisted updates").font(.system(size: 15, weight: .semibold))
+                    ForEach(model.vendorHistory) { entry in
+                        Surface {
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack {
+                                    Text(entry.appName).font(.system(size: 13, weight: .semibold))
+                                    Spacer()
+                                    StatusPill(title: entry.state == .verified ? "Assisted target verified" : entry.state == .notVerified ? "Not verified" : "Awaiting you", tone: entry.state == .verified ? .success : .attention)
+                                }
+                                Text("\(entry.fromVersion) → \(entry.targetVersion) · \(entry.channel)").font(.system(size: 12, design: .monospaced))
+                                Text(entry.message).font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                                Text(entry.appPath).font(.system(size: 11, design: .monospaced)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                                if model.canVerifyVendorResult(entry.id) {
+                                    Button("Verify Reviewed Result") { model.verifyVendorResult(entry.id) }.disabled(model.busy)
+                                } else if entry.state != .verified {
+                                    Text("This session has no live review context. Check the application again before reviewing a new target.").font(.system(size: 12)).foregroundStyle(Maccet.secondary)
+                                }
+                            }
+                        }
+                    }
                 }
             }.padding(.horizontal, 28).padding(.bottom, 28)
         }
     }
-    private func stage(_ state: TaskState) -> Int { switch state { case .queued: return 0; case .preflight: return 1; case .installing: return 2; case .verifying: return 3; default: return 4 } }
+    private func stage(_ state: TaskState) -> Int { switch state { case .queued: return 0; case .preflight: return 1; case .installing, .needsAttention: return 2; case .verifying: return 3; default: return 4 } }
 }
 private struct HistoryCard: View {
     @EnvironmentObject var model: AppModel
@@ -228,9 +287,26 @@ private struct HistoryCard: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(entry.message)
                         Text(entry.appPath).font(.system(size: 11, design: .monospaced))
+                        if let observation = entry.lastProcessObservation { Text(observation.message) }
+                        if let attention = entry.automaticAttentionMessage { Text("Automatic attempt observation: " + attention) }
                         if let cleanup = entry.cleanupMessage { Label(cleanup, systemImage: "sparkles") }
                     }.font(.system(size: 12)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 10)
                 }.font(.system(size: 12))
+                if let assisted = entry.assistedVerification {
+                    Label(assisted.verified ? "Assisted target verified" : "Assisted target not verified", systemImage: assisted.verified ? "checkmark.shield" : "exclamationmark.triangle")
+                        .font(.system(size: 12, weight: .medium)).foregroundStyle(assisted.verified ? StatusTone.success.foreground : StatusTone.attention.foreground)
+                    Text(assisted.message).font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                if model.appStoreHandoffURL(for: entry.id) != nil {
+                    HStack {
+                        Button("Open App Store") { model.openAppStoreHandoff(for: entry.id) }
+                        if model.canVerifyAssisted(entry.id) {
+                            Button("Verify Assisted Result") { model.verifyAssistedResult(entry.id) }.disabled(model.busy)
+                        }
+                    }
+                    Text(entry.state.isActive ? "Inspect App Store or the authorization dialog. Verification is available after the automatic command settles; the active installer is allowed to finish." : "Complete the update in App Store, then verify the reviewed target. Verification context is available for reviews made in this session.")
+                        .font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                }
                 if [.failed, .deferred, .interrupted].contains(entry.state) {
                     Button("Rescan Before Retrying", action: model.scan).disabled(model.busy)
                 }
@@ -300,9 +376,9 @@ struct SettingsPage: View {
                 Surface {
                     VStack(alignment: .leading, spacing: 16) {
                         Text("Privacy & behavior").font(.system(size: 15, weight: .semibold))
-                        Label("Inventory and history stay on this Mac. Up to 1,000 recent attempts are kept.", systemImage: "lock.shield")
-                        Label("Source preparation and checks contact GitHub, Homebrew, MacPorts, and Apple services.", systemImage: "network")
-                        Label("Application updates require your review and revalidation.", systemImage: "checkmark.shield")
+                        Label("Inventory, automatic history and assisted results stay on this Mac. Up to 1,000 records of each history are kept.", systemImage: "lock.shield")
+                        Label("Source preparation contacts GitHub, Homebrew, MacPorts and Apple. Optional checks contact Google and the feed or catalog publishers you enable.", systemImage: "network")
+                        Label("Updates use a reviewed manager plan or the vendor’s own updater.", systemImage: "checkmark.shield")
                         Label("Running apps can be asked to quit normally. Apps are never force-quit.", systemImage: "hand.raised")
                     }.font(.system(size: 12)).foregroundStyle(Maccet.secondary)
                 }

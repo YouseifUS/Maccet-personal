@@ -40,6 +40,8 @@ public struct AppRecord: Codable, Identifiable, Equatable {
     public var build: String
     public var hasStoreReceipt: Bool
     public var sparkleFeed: String?
+    public var sparkleRequiresSignedFeed: Bool?
+    public var sparkleObservation: SparkleObservation?
     public var source: UpdateSource?
     public var packageID: String?
     public var targetVersion: String?
@@ -54,6 +56,8 @@ public struct AppRecord: Codable, Identifiable, Equatable {
     public var automatic: Bool = false
     public var routeExecutable: String?
     public var routes: [UpdateRoute]?
+    public var catalogCandidates: [CatalogCandidate]?
+    public var vendorObservation: VendorObservation?
 
     public init(name: String, path: String, bundleID: String, version: String, build: String = "", hasStoreReceipt: Bool = false, sparkleFeed: String? = nil) {
         self.name = name; self.path = path; self.bundleID = bundleID
@@ -100,6 +104,10 @@ public struct Preferences: Codable {
     public var skippedReleases: [String: String] = [:]
     public var cleanupAfterSuccess = true
     public var preferredSources: [String: UpdateSource]?
+    public var checkEmbeddedSparkleFeeds: Bool?
+    public var checkOfficialVendorReleases: Bool?
+    public var discoveryCatalog: DiscoveryCatalogConfiguration?
+    public var discoveryChannelReviews: [String: DiscoveryChannelReview]?
     public var includeSystemApplications: Bool?
     public var inventoryRoots: [String] {
         scanRoots + ((includeSystemApplications ?? true) ? ["/System/Applications", "/System/Library/CoreServices/Applications"] : [])
@@ -168,9 +176,9 @@ public enum SourceResolver {
 }
 
 public enum TaskState: String, Codable {
-    case queued, preflight, installing, verifying, succeeded, failed, deferred, canceled, interrupted
-    public var title: String { rawValue.capitalized }
-    public var isActive: Bool { [.queued, .preflight, .installing, .verifying].contains(self) }
+    case queued, preflight, installing, needsAttention, verifying, succeeded, failed, deferred, canceled, interrupted
+    public var title: String { self == .needsAttention ? "Needs attention" : rawValue.capitalized }
+    public var isActive: Bool { [.queued, .preflight, .installing, .needsAttention, .verifying].contains(self) }
 }
 
 public struct ActivityRecord: Codable, Identifiable {
@@ -184,8 +192,13 @@ public struct ActivityRecord: Codable, Identifiable {
     public var state: TaskState
     public var message: String
     public var cleanupMessage: String?
+    public var lastProcessObservation: ProcessObservation?
+    public var automaticAttentionMessage: String?
+    public var storeID: String?
+    public var assistedVerification: AssistedVerification?
     public init(app: AppRecord, state: TaskState, message: String) {
         appName = app.name; appPath = app.path; source = app.source
+        storeID = app.source == .appStore ? app.packageID : nil
         fromVersion = app.version; targetVersion = app.targetVersion ?? "Unknown"
         self.state = state; self.message = message
     }

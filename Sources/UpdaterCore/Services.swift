@@ -5,6 +5,9 @@ public struct ScanService {
     public let runner: any CommandRunning
     public let cacheRoot: URL?
     public let sourcePaths: [UpdateSource: String]
+    public var sparkleChecker = SparkleCheck()
+    public var vendorChecker = OfficialVendorService()
+    public var discoveryCatalog: AuthenticatedSourceMappingCatalog?
     public init(runner: any CommandRunning = ProcessRunner(), cacheRoot: URL? = nil, sourcePaths: [UpdateSource: String]? = nil) {
         self.runner = runner; self.cacheRoot = cacheRoot
         self.sourcePaths = sourcePaths ?? ToolLocator.defaultSources()
@@ -58,6 +61,67 @@ public struct ScanService {
             }
             result.sources.append(health)
             await onPartial?(result)
+        }
+        if preferences.checkOfficialVendorReleases == true {
+            var checks = 0
+            let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+            for index in result.apps.indices where OfficialVendorService.recognizes(result.apps[index]) && result.apps[index].state != .systemManaged
+                && !result.apps[index].hasStoreReceipt && (result.apps[index].routes ?? []).isEmpty {
+                let observation: VendorObservation
+                if checks >= 8 || ContinuousClock.now >= deadline || Task.isCancelled {
+                    observation = VendorObservation(state: .unsupported, message: "Vendor scan request/time budget reached or canceled. This copy was not requested.")
+                } else {
+                    checks += 1
+                    observation = await vendorChecker.check(result.apps[index], review: preferences.discoveryChannelReviews?[result.apps[index].id])
+                }
+                result.apps[index].vendorObservation = observation
+                result.apps[index].detail = observation.message; result.apps[index].automatic = false
+                switch observation.state {
+                case .updateAvailable:
+                    result.apps[index].targetVersion = observation.targetVersion; result.apps[index].state = .manual; result.apps[index].checkedAt = observation.date
+                case .current: result.apps[index].state = .current; result.apps[index].checkedAt = observation.date
+                case .unsupported: result.apps[index].state = .unchecked
+                case .failed: result.apps[index].state = .failed
+                }
+                await onPartial?(result)
+            }
+        }
+        // Embedded-feed observations cannot displace a manager or store receipt.
+        var feedCount = 0
+        let feedDeadline = ContinuousClock.now.advanced(by: .seconds(30))
+        for index in result.apps.indices where preferences.checkEmbeddedSparkleFeeds == true && result.apps[index].sparkleFeed != nil
+            && !result.apps[index].hasStoreReceipt && result.apps[index].state != .systemManaged
+            && result.apps[index].vendorObservation == nil && (result.apps[index].routes ?? []).isEmpty {
+            let observation: SparkleObservation
+            if Task.isCancelled {
+                observation = SparkleObservation(state: .failed, message: "Sparkle check canceled.")
+            } else if feedCount >= 16 || ContinuousClock.now >= feedDeadline {
+                observation = SparkleObservation(state: .unsupported, message: "The Sparkle scan request/time budget was reached. This feed was not requested; choose a smaller scan folder to include it.")
+            } else {
+                feedCount += 1
+                observation = await sparkleChecker.check(result.apps[index])
+            }
+            result.apps[index].sparkleObservation = observation
+            result.apps[index].detail = observation.message
+            result.apps[index].automatic = false
+            switch observation.state {
+            case .updateAvailable:
+                result.apps[index].state = .manual
+                result.apps[index].targetVersion = observation.version
+                result.apps[index].targetBuild = observation.build
+                result.apps[index].checkedAt = observation.date
+            case .current:
+                result.apps[index].state = .current
+                result.apps[index].checkedAt = observation.date
+            case .unsupported: result.apps[index].state = .unchecked
+            case .failed: result.apps[index].state = .failed
+            }
+            await onPartial?(result)
+        }
+        if let discoveryCatalog {
+            for index in result.apps.indices {
+                result.apps[index].catalogCandidates = SourceDiscoveryService.candidates(for: result.apps[index], catalog: discoveryCatalog, review: preferences.discoveryChannelReviews?[result.apps[index].id])
+            }
         }
         result.date = Date()
         return result
@@ -127,10 +191,11 @@ public struct UpdateEngine {
         return checked
     }
 
-    public func execute(_ plan: PlannedUpdate, cleanup: Bool, onStage: @escaping (TaskState, String) async throws -> Void) async -> ActivityRecord {
+    public func execute(_ plan: PlannedUpdate, cleanup: Bool, onObservation: ((ProcessObservation) async -> Void)? = nil, onStage: @escaping (TaskState, String) async throws -> Void) async -> ActivityRecord {
         let app = plan.app
         var record = ActivityRecord(app: app, state: .preflight, message: "Revalidating identity and target release.")
         var ownedCache: OwnedUpdateCache?
+        let observations = OperationObservationHistory()
         do {
             guard let ownership = try ApplicationUpdateOwnership.acquire(for: app.path) else {
                 record.state = .deferred
@@ -171,7 +236,10 @@ public struct UpdateEngine {
                 try await onStage(.installing, "Installing the reviewed release through App Store.")
                 try plan.reviewedSignature.validate(at: app.path)
                 try plan.validateReviewedTool()
-                try await AppStoreAdapter(executable: app.routeExecutable!, runner: runner).upgrade(app)
+                try await AppStoreAdapter(executable: app.routeExecutable!, runner: runner).upgrade(app) { observation in
+                    await observations.receive(observation)
+                    await onObservation?(observation)
+                }
             }
             try await onStage(.verifying, "Reading the installed application again.")
             var verified = false
@@ -202,7 +270,29 @@ public struct UpdateEngine {
             record.state = .failed; record.message = Diagnostics.redact(error.localizedDescription)
             record.cleanupMessage = ownedCache.map { "No cleanup performed. Failed-attempt artifacts retained at " + Diagnostics.redact($0.folder.path) } ?? "No cleanup performed for this attempt."
         }
+        let snapshot = await observations.snapshot()
+        record.lastProcessObservation = snapshot.0
+        record.automaticAttentionMessage = snapshot.1
         return record
+    }
+    /// A separate observation after a settled automatic attempt; it never rewrites
+    /// the original attempt's outcome or removes its artifacts.
+    public static func verifyAssisted(_ plan: PlannedUpdate) -> AssistedVerification {
+        do {
+            guard plan.app.source == .appStore, plan.app.hasStoreReceipt,
+                  let id = plan.app.packageID else { throw UpdaterError("This review has no App Store identity.") }
+            try ToolLocator.validateStoreID(id)
+            guard let ownership = try ApplicationUpdateOwnership.acquire(for: plan.app.path) else {
+                throw UpdaterError("An update still owns this application. Wait for its command to settle before verifying an assisted result.")
+            }
+            defer { ownership.release() }
+            let installed = try AppInventory().read(plan.app.path)
+            guard verify(before: plan.app, after: installed) else { throw UpdaterError("The reviewed App Store target, path, bundle identity or receipt could not be verified.") }
+            try plan.reviewedSignature.validate(at: plan.app.path)
+            return AssistedVerification(verified: true, message: "Independently observed the reviewed target after the App Store handoff. The automatic attempt's original outcome is retained; no cleanup was performed.")
+        } catch {
+            return AssistedVerification(verified: false, message: Diagnostics.redact(error.localizedDescription))
+        }
     }
     // Metadata comparison only; execute also validates the reviewed code signature.
     public static func verify(before: AppRecord, after: AppRecord) -> Bool {

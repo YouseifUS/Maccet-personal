@@ -478,6 +478,8 @@ final class AppModel: ObservableObject {
             NSWorkspace.shared.open(URL(string: "https://formulae.brew.sh/cask/" + id)!)
         } else if let id = app.packageID, app.source == .macPorts, (try? MacPortsAdapter.validateName(id)) != nil {
             NSWorkspace.shared.open(URL(string: "https://ports.macports.org/port/" + id + "/")!)
+        } else if let feed = app.sparkleFeed, app.sparkleInstallRoute != nil, let url = URL(string: feed) {
+            NSWorkspace.shared.open(url)
         } else if app.hasStoreReceipt { NSWorkspace.shared.open(URL(string: "macappstore://showUpdatesPage")!) }
     }
     func exportReport() {

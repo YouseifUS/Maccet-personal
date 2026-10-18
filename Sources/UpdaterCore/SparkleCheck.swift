@@ -25,6 +25,24 @@ public struct SparkleFeedLoader: SparkleFeedLoading {
     }
 }
 
+/// Selected release metadata exposed separately from the read-only observation.
+public struct SparkleSelectedRelease: Codable, Equatable {
+    public var version: String
+    public var build: String
+    public var archiveURL: String
+    public var archiveLength: Int?
+    public var archiveType: String?
+    public var edSignature: String?
+    public var dsaSignature: String?
+    public var installationType: String?
+    public var channel: String?
+    public init(version: String, build: String, archiveURL: String, archiveLength: Int? = nil, archiveType: String? = nil, edSignature: String? = nil, dsaSignature: String? = nil, installationType: String? = nil, channel: String? = nil) {
+        self.version = version; self.build = build; self.archiveURL = archiveURL; self.archiveLength = archiveLength
+        self.archiveType = archiveType; self.edSignature = edSignature; self.dsaSignature = dsaSignature
+        self.installationType = installationType; self.channel = channel
+    }
+}
+
 public struct SparkleCheck {
     public let loader: any SparkleFeedLoading
     public let macOS: String
@@ -39,32 +57,62 @@ public struct SparkleCheck {
         self.architecture = architecture ?? "x86_64"
         #endif
     }
-    public func check(_ app: AppRecord) async -> SparkleObservation {
+    public func check(_ app: AppRecord, review: DiscoveryChannelReview? = nil) async -> SparkleObservation {
+        await checkWithRelease(app, review: review).observation
+    }
+    /// Performs one bounded feed load and returns both the read-only observation
+    /// and the selected release metadata needed to evaluate installability.
+    public func checkWithRelease(_ app: AppRecord, review: DiscoveryChannelReview? = nil) async -> (observation: SparkleObservation, release: SparkleSelectedRelease?) {
         do {
             guard let text = app.sparkleFeed, let url = URL(string: text) else { throw UpdaterError("No valid embedded Sparkle feed URL.") }
             try SparkleFeedLoader.validateURL(url)
             if app.sparkleRequiresSignedFeed == true {
-                return SparkleObservation(state: .unsupported, message: "This application requires signed appcasts. Use its built-in updater to authenticate the feed.")
+                return (SparkleObservation(state: .unsupported, message: "This application requires signed appcasts. Use its built-in updater to authenticate the feed."), nil)
             }
             // Do not claim parity with delegate-provided channels, feeds or custom comparators.
             guard numeric(app.build), numeric(app.version), ["arm64", "x86_64"].contains(architecture) else {
-                return SparkleObservation(state: .unsupported, message: "Sparkle's custom version/channel behavior cannot be established from this application's numeric metadata. Use its built-in updater.")
+                return (SparkleObservation(state: .unsupported, message: "Sparkle's custom version/channel behavior cannot be established from this application's numeric metadata. Use its built-in updater."), nil)
             }
-            return try evaluate(await loader.load(url), app: app)
+            let data = try await loader.load(url)
+            let observation = try evaluate(data, app: app, review: review)
+            let release = try selectedRelease(data, app: app, review: review)
+            return (observation, release)
         } catch is CancellationError {
-            return SparkleObservation(state: .failed, message: "Sparkle check canceled.")
+            return (SparkleObservation(state: .failed, message: "Sparkle check canceled."), nil)
         } catch {
-            return SparkleObservation(state: .failed, message: Diagnostics.redact(error.localizedDescription))
+            return (SparkleObservation(state: .failed, message: Diagnostics.redact(error.localizedDescription)), nil)
         }
     }
-    public func evaluate(_ data: Data, app: AppRecord) throws -> SparkleObservation {
+    public func evaluate(_ data: Data, app: AppRecord, review: DiscoveryChannelReview? = nil) throws -> SparkleObservation {
+        guard let release = try selectedRelease(data, app: app, review: review) else {
+            return SparkleObservation(state: .unsupported, message: "No supported release was found for this OS, architecture and observed channel. Use the application's updater.")
+        }
+        let scope = release.channel.map { "default and \($0) channels" } ?? "the default channel"
+        let disclaimer = "Read-only embedded-feed observation for \(scope); runtime feed/channel overrides and custom comparators are not observed. Use the application's built-in updater to confirm and install."
+        return SparkleObservation(state: ReleaseComparison.compare(app.build, release.build) == .orderedAscending ? .updateAvailable : .current,
+                                  version: release.version, build: release.build, message: disclaimer)
+    }
+    /// Returns the supported release the observation would select, if any.
+    public func selectedRelease(_ data: Data, app: AppRecord, review: DiscoveryChannelReview? = nil) throws -> SparkleSelectedRelease? {
         guard numeric(app.build), numeric(app.version), numeric(macOS), ["arm64", "x86_64"].contains(architecture) else { throw UpdaterError("Unsupported installed version or operating system for Sparkle comparison.") }
         let items = try AppcastParser.read(data)
         var compatible: [AppcastItem] = []
-        let channel = app.sourceEvidence?.channel
+        let reviewedChannel: String? = {
+            guard let review = review,
+                  review.bundleID == app.bundleID,
+                  ToolLocator.canonicalPath(review.path) == ToolLocator.canonicalPath(app.path) else { return nil }
+            return review.channel
+        }()
+        let channel = reviewedChannel ?? app.sourceEvidence?.channel
         // Only an independently established non-default channel can add beta items.
         for item in items {
-            if let itemChannel = item.values["channel"], itemChannel != channel { continue }
+            let itemChannel = item.values["channel"]
+            if let channel {
+                guard itemChannel == channel else { continue }
+            } else if let itemChannel = itemChannel, !itemChannel.isEmpty {
+                // Without an independently established non-default channel, ignore beta/dev/etc. items.
+                continue
+            }
             if let os = item.enclosure["os"], os != "macos" { continue }
             if let hardware = item.values["hardwareRequirements"] {
                 guard hardware == "arm64" else { throw UpdaterError("Unsupported Sparkle hardware requirements. Use the built-in updater.") }
@@ -92,15 +140,17 @@ public struct SparkleCheck {
             }
             compatible.append(item)
         }
-        guard let latest = compatible.max(by: { ReleaseComparison.compare($0.values["version"]!, $1.values["version"]!) == .orderedAscending }) else {
-            return SparkleObservation(state: .unsupported, message: "No supported release was found for this OS, architecture and observed channel. Use the application's updater.")
-        }
+        guard let latest = compatible.max(by: { ReleaseComparison.compare($0.values["version"]!, $1.values["version"]!) == .orderedAscending }) else { return nil }
         let build = latest.values["version"]!
         let version = latest.values["shortVersionString"] ?? build
-        let scope = channel.map { "default and \($0) channels" } ?? "the default channel"
-        let disclaimer = "Read-only embedded-feed observation for \(scope); runtime feed/channel overrides and custom comparators are not observed. Use the application's built-in updater to confirm and install."
-        return SparkleObservation(state: ReleaseComparison.compare(app.build, build) == .orderedAscending ? .updateAvailable : .current,
-                                  version: version, build: build, message: disclaimer)
+        guard let archiveURL = latest.enclosure["url"] else { return nil }
+        return SparkleSelectedRelease(version: version, build: build, archiveURL: archiveURL,
+                                      archiveLength: latest.enclosure["length"].flatMap(Int.init),
+                                      archiveType: latest.enclosure["type"],
+                                      edSignature: latest.values["edSignature"],
+                                      dsaSignature: latest.values["dsaSignature"],
+                                      installationType: latest.values["installationType"],
+                                      channel: channel)
     }
     private func numeric(_ value: String) -> Bool {
         value.utf8.count <= 64 && value.range(of: #"\A[0-9]+(?:\.[0-9]+)*\z"#, options: .regularExpression) != nil
@@ -163,7 +213,7 @@ private final class AppcastParser: NSObject, XMLParserDelegate {
                     fail(parser, "Unsupported Sparkle enclosure rule."); return
                 }
             }
-            for key in ["version", "shortVersionString", "os"] {
+            for key in ["version", "shortVersionString", "os", "edSignature", "dsaSignature", "installationType"] {
                 // XMLParser retains qualified attribute names. Resolve their prefix below.
                 for (attribute, value) in attributes where attribute.hasSuffix(":" + key) {
                     let prefix = String(attribute.split(separator: ":")[0])

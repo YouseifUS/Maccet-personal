@@ -88,7 +88,15 @@ public struct AppRecord: Codable, Identifiable, Equatable {
         self.hasStoreReceipt = hasStoreReceipt; self.sparkleFeed = sparkleFeed
     }
     public var hasUpdate: Bool { targetVersion != nil && [.updateAvailable, .manual].contains(state) }
-    public var releaseIdentity: String { (sparkleInstallRoute != nil ? "sparkle" : source?.rawValue ?? "unknown") + ":\(packageID ?? ""):\(targetVersion ?? "")" + (targetPackageVersion.map { ":package=" + $0 } ?? "") + (targetBuild.map { ":build=" + $0 } ?? "") + ((sourceEvidence?.channel).map { ":channel=" + $0 } ?? "") + (sparkleInstallRoute.map { ":sig=" + $0.edSignature.prefix(16) } ?? "") }
+    public var releaseIdentity: String {
+        let sourceIdentity: String = sparkleInstallRoute != nil ? "sparkle" : (source?.rawValue ?? "unknown")
+        let baseIdentity: String = sourceIdentity + ":\(packageID ?? ""):\(targetVersion ?? "")"
+        let packageComponent: String = targetPackageVersion.map { ":package=" + $0 } ?? ""
+        let buildComponent: String = targetBuild.map { ":build=" + $0 } ?? ""
+        let channelComponent: String = sourceEvidence?.channel.map { ":channel=" + $0 } ?? ""
+        let signatureComponent: String = sparkleInstallRoute.map { ":sig=" + String($0.edSignature.prefix(16)) } ?? ""
+        return baseIdentity + packageComponent + buildComponent + channelComponent + signatureComponent
+    }
 }
 
 public struct SourceHealth: Codable, Identifiable {

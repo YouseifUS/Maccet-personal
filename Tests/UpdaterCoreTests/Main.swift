@@ -28,6 +28,66 @@ private actor InstallBarrier {
     func release() { released = true }
 }
 
+private struct FakeSparkleInstaller: SparkleInstalling {
+    var action: (SparkleInstallPlan) throws -> AppRecord
+    func install(_ plan: SparkleInstallPlan, cacheRoot: URL) async throws -> AppRecord {
+        try action(plan)
+    }
+}
+
+private struct FakeSparkleDownloader: SparkleArchiveDownloading {
+    var archive: Data
+    var onDownload: (() -> Void)?
+    func download(_ url: URL, expectedLength: Int?, maximumBytes: Int) async throws -> Data {
+        onDownload?()
+        return archive
+    }
+}
+
+private func archiveForSparkle(appName: String, version: String, build: String, bundleID: String) -> Data {
+    var files: [String: Data] = ["\(appName)/Contents/Info.plist": appInfoPlist(version: version, build: build, bundleID: bundleID, executable: "Example")]
+    if let executableData = try? Data(contentsOf: URL(fileURLWithPath: "/usr/bin/true")) {
+        files["\(appName)/Contents/MacOS/Example"] = executableData
+    }
+    return storedZIP(appName: appName, files: files)
+}
+
+private func archiveFromFixture(_ fixture: Fixture, appName: String = "Example.app", version: String, build: String, bundleID: String? = nil) throws -> Data {
+    let fm = FileManager.default
+    var files: [String: Data] = [:]
+    let appURL = fixture.appURL
+    let appPath = appURL.path
+    for relative in fm.subpaths(atPath: appPath) ?? [] {
+        let url = appURL.appendingPathComponent(relative)
+        guard (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) != true else { continue }
+        files["\(appName)/\(relative)"] = try Data(contentsOf: url)
+    }
+    guard let infoData = files["\(appName)/Contents/Info.plist"] else {
+        throw CheckFailure(description: "Could not find Info.plist in fixture archive")
+    }
+    var info = try PropertyListSerialization.propertyList(from: infoData, format: nil) as! [String: Any]
+    info["CFBundleShortVersionString"] = version
+    info["CFBundleVersion"] = build
+    if let bundleID { info["CFBundleIdentifier"] = bundleID }
+    files["\(appName)/Contents/Info.plist"] = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+    return storedZIP(appName: appName, files: files)
+}
+
+private func installPlan(fixture: Fixture, archive: Data, signature: String, publicKey: String) throws -> SparkleInstallPlan {
+    let app = try fixture.app()
+    guard let fingerprint = SparkleTrustKey.ed25519PublicKeyFingerprint(at: app.path) else {
+        throw CheckFailure(description: "Could not read trusted EdDSA key from fixture at \(app.path)")
+    }
+    let release = SparkleSelectedRelease(version: "2.0", build: "20", archiveURL: "https://downloads.example.com/app.zip", archiveLength: archive.count, archiveType: nil, edSignature: signature, dsaSignature: nil, installationType: nil, channel: nil)
+    return try SparkleInstallPlan(app: app, release: release, publicKeyFingerprint: fingerprint, channelReview: nil)
+}
+
+private func appInfoPlist(version: String, build: String, bundleID: String, executable: String? = nil) -> Data {
+    var info: [String: Any] = ["CFBundleIdentifier": bundleID, "CFBundleName": "Example", "CFBundleShortVersionString": version, "CFBundleVersion": build]
+    if let executable { info["CFBundleExecutable"] = executable; info["CFBundlePackageType"] = "APPL" }
+    return (try? PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)) ?? Data()
+}
+
 private struct Fixture {
     let root: URL
     let appURL: URL
@@ -41,6 +101,19 @@ private struct Fixture {
         try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
         let info = ["CFBundleIdentifier": "test.unified-updater." + root.lastPathComponent, "CFBundleName": "Example", "CFBundleShortVersionString": version, "CFBundleVersion": build]
         try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: contents.appendingPathComponent("Info.plist"), options: .atomic)
+    }
+    func setVersion(_ version: String, build: String) throws {
+        let infoURL = appURL.appendingPathComponent("Contents/Info.plist")
+        var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: infoURL), format: nil) as! [String: Any]
+        info["CFBundleShortVersionString"] = version
+        info["CFBundleVersion"] = build
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: infoURL, options: .atomic)
+    }
+    func setBundleID(_ bundleID: String) throws {
+        let infoURL = appURL.appendingPathComponent("Contents/Info.plist")
+        var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: infoURL), format: nil) as! [String: Any]
+        info["CFBundleIdentifier"] = bundleID
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: infoURL, options: .atomic)
     }
     func clean() { try? FileManager.default.removeItem(at: root) }
     func app() throws -> AppRecord { try AppInventory().read(appURL.path) }
@@ -71,6 +144,42 @@ private struct Fixture {
     }
     func candidate() throws -> AppRecord {
         HomebrewAdapter.apply(casks: try HomebrewAdapter.parseCasks(brewJSON()), outdated: ["example"], to: [try app()], executable: "/usr/bin/true")[0]
+    }
+    func sparkleApp(feed: String = "https://updates.example.com/feed.xml", publicKey: String? = nil, version: String = "1.0", build: String = "10") throws -> AppRecord {
+        try write(version: version, build: build)
+        let infoURL = appURL.appendingPathComponent("Contents/Info.plist")
+        var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: infoURL), format: nil) as! [String: Any]
+        info["SUFeedURL"] = feed
+        if let publicKey { info["SUPublicEDKey"] = publicKey }
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: infoURL, options: .atomic)
+        return try app()
+    }
+    func addExecutable() throws {
+        let fm = FileManager.default
+        let executable = appURL.appendingPathComponent("Contents/MacOS/Example")
+        try fm.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !fm.fileExists(atPath: executable.path) {
+            // Compile a tiny unsigned Mach-O executable so the bundle is genuinely unsigned.
+            let source = root.appendingPathComponent("main.c")
+            try "int main(void){return 0;}".write(to: source, atomically: true, encoding: .utf8)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/clang")
+            process.arguments = ["-arch", "arm64", "-O0", "-o", executable.path, source.path]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run(); process.waitUntilExit()
+            try expect(process.terminationStatus == 0, "Could not compile disposable fixture executable")
+            let strip = Process()
+            strip.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+            strip.arguments = ["--remove-signature", executable.path]
+            strip.standardOutput = FileHandle.nullDevice
+            strip.standardError = FileHandle.nullDevice
+            try strip.run(); strip.waitUntilExit()
+        }
+        let infoURL = appURL.appendingPathComponent("Contents/Info.plist")
+        var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: infoURL), format: nil) as! [String: Any]
+        info["CFBundleExecutable"] = "Example"; info["CFBundlePackageType"] = "APPL"
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: infoURL, options: .atomic)
     }
     func runner(install: @escaping () throws -> Void = {}) throws -> FakeRunner {
         let inventory = try brewJSON()
@@ -403,6 +512,383 @@ private enum Checks {
             prefs.scanRoots = [fixture.appURL.path]
             let managedResult = await managed.scan(preferences: prefs)
             try expect(managedLoader.requested.isEmpty && managedResult.apps[0].source == .homebrew)
+        }
+        await check("Sparkle install routes require a local EdDSA key and supported enclosure signature") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let key = Curve25519.Signing.PrivateKey()
+            let publicKey = key.publicKey.rawRepresentation.base64EncodedString()
+            let archive = storedZIP(appName: "Example.app", files: ["Example.app/Contents/Info.plist": appInfoPlist(version: "2.0", build: "20", bundleID: try fixture.app().bundleID)])
+            let signature = try key.signature(for: archive).base64EncodedString()
+            let loader = FixtureFeedLoader(String(decoding: appcast(feedItemSigned(edSignature: signature, length: archive.count)), as: UTF8.self))
+            var service = ScanService(runner: FakeRunner { _ in throw UpdaterError("No manager command expected") }, sourcePaths: [:])
+            service.sparkleChecker = SparkleCheck(loader: loader, macOS: "27.0", architecture: "arm64")
+            var prefs = Preferences(); prefs.scanRoots = [fixture.appURL.path]; prefs.includeSystemApplications = false; prefs.checkEmbeddedSparkleFeeds = true
+            // Without a local trust key the observation stays manual.
+            _ = try fixture.sparkleApp(feed: "https://updates.example.com/feed.xml")
+            let manual = await service.scan(preferences: prefs)
+            try expect(manual.apps[0].state == .manual && manual.apps[0].sparkleInstallRoute == nil && !prefs.isEligible(manual.apps[0]))
+            // With a trusted key and matching EdDSA signature an installable route is created.
+            let trusted = try fixture.sparkleApp(publicKey: publicKey)
+            let installable = await service.scan(preferences: prefs)
+            let route = installable.apps[0].sparkleInstallRoute
+            try expect(installable.apps[0].state == .updateAvailable && installable.apps[0].automatic == true && route != nil)
+            try expect(route?.edSignature == signature && route?.archiveLength == archive.count && prefs.isEligible(installable.apps[0]))
+            // Missing signature, DSA-only signatures, non-zip archives and package installation types stay manual.
+            for variant in [
+                appcast(feedItemSigned()),
+                appcast(feedItemSigned(dsaOnly: true)),
+                appcast(feedItemSigned(edSignature: signature, url: "https://downloads.example.com/app.dmg")),
+                appcast(feedItemSigned(edSignature: signature, installationType: "package"))
+            ] {
+                let variantLoader = FixtureFeedLoader(String(decoding: variant, as: UTF8.self))
+                service.sparkleChecker = SparkleCheck(loader: variantLoader, macOS: "27.0", architecture: "arm64")
+                let variantResult = await service.scan(preferences: prefs)
+                try expect(variantResult.apps[0].state == .manual && variantResult.apps[0].sparkleInstallRoute == nil)
+            }
+            // An unsupported channel blocks the route even with trust.
+            var betaReview = prefs; betaReview.discoveryChannelReviews = [trusted.id: DiscoveryChannelReview(path: trusted.path, bundleID: trusted.bundleID, teamIdentifier: "TEAMID1234", channel: "beta")]
+            service.sparkleChecker = SparkleCheck(loader: loader, macOS: "27.0", architecture: "arm64")
+            let beta = await service.scan(preferences: betaReview)
+            try expect(beta.apps[0].sparkleInstallRoute == nil)
+        }
+        await check("Sparkle archive inspector rejects unsafe layouts, symlinks, traversal and size bombs") {
+            let bundleID = "test.sparkle.archive"
+            let validFiles = ["Example.app/Contents/Info.plist": appInfoPlist(version: "2.0", build: "20", bundleID: bundleID)]
+            let valid = storedZIP(appName: "Example.app", files: validFiles)
+            let _ = try SparkleArchiveInspector.inspect(valid, maximumUncompressedBytes: 1024 * 1024)
+            let traversal = storedZIP(appName: "Example.app", files: ["Example.app/../../etc/passwd": Data("evil".utf8)])
+            try expectThrows { _ = try SparkleArchiveInspector.inspect(traversal, maximumUncompressedBytes: 1024 * 1024) }
+            let absolute = storedZIP(appName: "Example.app", files: ["/etc/passwd": Data("evil".utf8)])
+            try expectThrows { _ = try SparkleArchiveInspector.inspect(absolute, maximumUncompressedBytes: 1024 * 1024) }
+            let noApp = storedZIP(appName: "Payload", files: ["Payload/file.txt": Data("text".utf8)])
+            try expectThrows { _ = try SparkleArchiveInspector.inspect(noApp, maximumUncompressedBytes: 1024 * 1024) }
+            let multiple = storedZIP(appName: "Example.app", files: ["Example.app/Contents/Info.plist": validFiles.values.first!, "Other.app/Contents/Info.plist": validFiles.values.first!])
+            try expectThrows { _ = try SparkleArchiveInspector.inspect(multiple, maximumUncompressedBytes: 1024 * 1024) }
+            let huge = storedZIP(appName: "Example.app", files: ["Example.app/Contents/Info.plist": Data(repeating: 0, count: 100)])
+            try expectThrows { _ = try SparkleArchiveInspector.inspect(huge, maximumUncompressedBytes: 50) }
+        }
+        await check("Sparkle EdDSA signature verification accepts valid signatures and rejects tampering") {
+            let key = Curve25519.Signing.PrivateKey()
+            let publicKey = key.publicKey.rawRepresentation
+            let archive = Data("archive".utf8)
+            let signature = try key.signature(for: archive).base64EncodedString()
+            try SparkleSignatureVerifier.verifyEdDSA(archive: archive, signature: signature, publicKey: publicKey)
+            var tampered = archive; tampered.append(contentsOf: "!".utf8)
+            do { try SparkleSignatureVerifier.verifyEdDSA(archive: tampered, signature: signature, publicKey: publicKey); throw CheckFailure(description: "Tampered archive passed signature check") }
+            catch is UpdaterError { }
+            do { try SparkleSignatureVerifier.verifyEdDSA(archive: archive, signature: "invalid", publicKey: publicKey); throw CheckFailure(description: "Invalid signature accepted") }
+            catch is UpdaterError { }
+            do { try SparkleSignatureVerifier.verifyEdDSA(archive: archive, signature: signature, publicKey: Data(repeating: 0, count: 32)); throw CheckFailure(description: "Wrong public key accepted") }
+            catch is UpdaterError { }
+        }
+        await check("Sparkle installation defers running apps and verifies with an intercepted installer") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let key = Curve25519.Signing.PrivateKey()
+            let publicKey = key.publicKey.rawRepresentation.base64EncodedString()
+            let archive = storedZIP(appName: "Example.app", files: ["Example.app/Contents/Info.plist": appInfoPlist(version: "2.0", build: "20", bundleID: try fixture.app().bundleID)])
+            let signature = try key.signature(for: archive).base64EncodedString()
+            let loader = FixtureFeedLoader(String(decoding: appcast(feedItemSigned(edSignature: signature, length: archive.count)), as: UTF8.self))
+            var service = ScanService(runner: FakeRunner { _ in throw UpdaterError("No manager command expected") }, sourcePaths: [:])
+            service.sparkleChecker = SparkleCheck(loader: loader, macOS: "27.0", architecture: "arm64")
+            var prefs = Preferences(); prefs.scanRoots = [fixture.appURL.path]; prefs.includeSystemApplications = false; prefs.checkEmbeddedSparkleFeeds = true
+            _ = _ = try fixture.sparkleApp(publicKey: publicKey)
+            let scan = await service.scan(preferences: prefs)
+            try expect(scan.apps[0].sparkleInstallRoute != nil)
+            let plan = PlannedUpdate(app: scan.apps[0], preview: "")
+            var running = true
+            let installer = FakeSparkleInstaller { plan in
+                var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: fixture.appURL.appendingPathComponent("Contents/Info.plist")), format: nil) as! [String: Any]
+                info["CFBundleShortVersionString"] = "2.0"; info["CFBundleVersion"] = "20"
+                try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: fixture.appURL.appendingPathComponent("Contents/Info.plist"), options: .atomic)
+                return try AppInventory().read(fixture.appURL.path)
+            }
+            let engine = UpdateEngine(runner: FakeRunner { _ in throw UpdaterError("No manager command expected") }, sourcePaths: [:], sparkleFeedLoader: loader, sparkleInstaller: installer, isRunning: { _ in running })
+            let deferred = await engine.execute(plan, cleanup: true) { _, _ in }
+            try expect(deferred.state == .deferred && deferred.message.contains("still running"))
+            running = false
+            let result = await engine.execute(plan, cleanup: true) { _, _ in }
+            try expect(result.state == .succeeded && result.message.contains("2.0"))
+            let wrongInstaller = FakeSparkleInstaller { _ in
+                var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: fixture.appURL.appendingPathComponent("Contents/Info.plist")), format: nil) as! [String: Any]
+                info["CFBundleShortVersionString"] = "1.5"; info["CFBundleVersion"] = "15"
+                try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: fixture.appURL.appendingPathComponent("Contents/Info.plist"), options: .atomic)
+                return try AppInventory().read(fixture.appURL.path)
+            }
+            let wrongEngine = UpdateEngine(runner: FakeRunner { _ in throw UpdaterError("No manager command expected") }, sourcePaths: [:], sparkleFeedLoader: loader, sparkleInstaller: wrongInstaller, isRunning: { _ in false })
+            let wrong = await wrongEngine.execute(plan, cleanup: true) { _, _ in }
+            try expect(wrong.state == .failed && wrong.message.contains("target"))
+        }
+        await check("Sparkle installation preserves reviewed signature identity and blocks identity changes") {
+            func signedSparklePlan(_ fixture: Fixture, key: Curve25519.Signing.PrivateKey) async throws -> (PlannedUpdate, FixtureFeedLoader) {
+                let publicKey = key.publicKey.rawRepresentation.base64EncodedString()
+                let archive = storedZIP(appName: "Example.app", files: ["Example.app/Contents/Info.plist": appInfoPlist(version: "2.0", build: "20", bundleID: try fixture.app().bundleID, executable: "Example")])
+                let signature = try key.signature(for: archive).base64EncodedString()
+                let loader = FixtureFeedLoader(String(decoding: appcast(feedItemSigned(edSignature: signature, length: archive.count)), as: UTF8.self))
+                var service = ScanService(runner: FakeRunner { _ in throw UpdaterError("No manager command expected") }, sourcePaths: [:])
+                service.sparkleChecker = SparkleCheck(loader: loader, macOS: "27.0", architecture: "arm64")
+            var prefs = Preferences(); prefs.scanRoots = [fixture.appURL.path]; prefs.includeSystemApplications = false; prefs.checkEmbeddedSparkleFeeds = true
+            _ = _ = try fixture.sparkleApp(publicKey: publicKey)
+            _ = await service.scan(preferences: prefs)
+            try fixture.sign()
+                let scan = await service.scan(preferences: prefs)
+                try expect(scan.apps[0].sparkleInstallRoute != nil)
+                return (PlannedUpdate(app: scan.apps[0], preview: ""), loader)
+            }
+            let key = Curve25519.Signing.PrivateKey()
+            let sameFixture = try Fixture(); defer { sameFixture.clean() }
+            let (samePlan, sameLoader) = try await signedSparklePlan(sameFixture, key: key)
+            let sameIdentity = FakeSparkleInstaller { _ in
+                try sameFixture.write(version: "2.0", build: "20")
+                try sameFixture.sign()
+                return try AppInventory().read(sameFixture.appURL.path)
+            }
+            let sameEngine = UpdateEngine(runner: FakeRunner { _ in throw UpdaterError("No manager command expected") }, sourcePaths: [:], sparkleFeedLoader: sameLoader, sparkleInstaller: sameIdentity, isRunning: { _ in false })
+            let success = await sameEngine.execute(samePlan, cleanup: true) { _, _ in }
+            try expect(success.state == .succeeded, success.message)
+            let changedFixture = try Fixture(); defer { changedFixture.clean() }
+            let (changedPlan, changedLoader) = try await signedSparklePlan(changedFixture, key: key)
+            let changedIdentity = FakeSparkleInstaller { _ in
+                try changedFixture.write(version: "2.0", build: "20")
+                try changedFixture.sign(identifier: "different.signing.identity")
+                return try AppInventory().read(changedFixture.appURL.path)
+            }
+            let changedEngine = UpdateEngine(runner: FakeRunner { _ in throw UpdaterError("No manager command expected") }, sourcePaths: [:], sparkleFeedLoader: changedLoader, sparkleInstaller: changedIdentity, isRunning: { _ in false })
+            let failure = await changedEngine.execute(changedPlan, cleanup: true) { _, _ in }
+            try expect(failure.state == .failed && failure.message.contains("signature"))
+        }
+        await check("Sparkle routes do not displace existing manager routes") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let key = Curve25519.Signing.PrivateKey()
+            let publicKey = key.publicKey.rawRepresentation.base64EncodedString()
+            let loader = FixtureFeedLoader(String(decoding: appcast(feedItemSigned(edSignature: try key.signature(for: Data("archive".utf8)).base64EncodedString())), as: UTF8.self))
+            var service = ScanService(runner: try fixture.runner(), sourcePaths: [.homebrew: "/usr/bin/true"])
+            service.sparkleChecker = SparkleCheck(loader: loader, macOS: "27.0", architecture: "arm64")
+            var prefs = Preferences(); prefs.scanRoots = [fixture.appURL.path]; prefs.includeSystemApplications = false; prefs.checkEmbeddedSparkleFeeds = true
+            _ = _ = try fixture.sparkleApp(publicKey: publicKey)
+            let result = await service.scan(preferences: prefs)
+            try expect(result.apps[0].source == .homebrew && result.apps[0].sparkleInstallRoute == nil)
+        }
+        await check("Sparkle installer preserves pre-existing backup lookalikes and uses unique backup names") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let key = Curve25519.Signing.PrivateKey()
+            let publicKey = key.publicKey.rawRepresentation.base64EncodedString()
+            _ = try fixture.sparkleApp(publicKey: publicKey)
+            try fixture.addExecutable()
+            let archive = try archiveFromFixture(fixture, version: "2.0", build: "20")
+            let signature = try key.signature(for: archive).base64EncodedString()
+            let plan = try installPlan(fixture: fixture, archive: archive, signature: signature, publicKey: publicKey)
+            let sentinel = fixture.appURL.appendingPathComponent("../Example.app.maccet-backup").resolvingSymlinksInPath()
+            let sentinelContent = Data("sentinel".utf8)
+            try sentinelContent.write(to: sentinel, options: .atomic)
+            let downloader = FakeSparkleDownloader(archive: archive)
+            let installer = SparkleInstaller(downloader: downloader, isRunning: { _ in false })
+            _ = try await installer.install(plan, cacheRoot: fixture.root.appendingPathComponent("Cache"))
+            let preserved = try Data(contentsOf: sentinel)
+            try expect(preserved == sentinelContent)
+            // Failure path also leaves the sentinel untouched.
+            let failureFixture = try Fixture(); defer { failureFixture.clean() }
+            _ = try failureFixture.sparkleApp(publicKey: publicKey)
+            try failureFixture.addExecutable()
+            let failureSentinel = failureFixture.appURL.appendingPathComponent("../Example.app.maccet-backup").resolvingSymlinksInPath()
+            try sentinelContent.write(to: failureSentinel, options: .atomic)
+            let badArchive = try archiveFromFixture(failureFixture, version: "2.0", build: "20")
+            let badPlan = try installPlan(fixture: failureFixture, archive: badArchive, signature: signature, publicKey: publicKey)
+            let badInstaller = SparkleInstaller(downloader: FakeSparkleDownloader(archive: badArchive), isRunning: { _ in false })
+            do { _ = try await badInstaller.install(badPlan, cacheRoot: failureFixture.root.appendingPathComponent("Cache")); throw CheckFailure(description: "Bad signature should fail") } catch is UpdaterError { }
+            let failurePreserved = try Data(contentsOf: failureSentinel)
+            try expect(failurePreserved == sentinelContent)
+        }
+        await check("Sparkle installer rechecks running app before replacement and leaves original intact") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let key = Curve25519.Signing.PrivateKey()
+            let publicKey = key.publicKey.rawRepresentation.base64EncodedString()
+            _ =             _ = try fixture.sparkleApp(publicKey: publicKey)
+            try fixture.addExecutable()
+            let archive = try archiveFromFixture(fixture, version: "2.0", build: "20")
+            let signature = try key.signature(for: archive).base64EncodedString()
+            let plan = try installPlan(fixture: fixture, archive: archive, signature: signature, publicKey: publicKey)
+            var running = false
+            let downloader = FakeSparkleDownloader(archive: archive, onDownload: { running = true })
+            let installer = SparkleInstaller(downloader: downloader, isRunning: { _ in running })
+            do { _ = try await installer.install(plan, cacheRoot: fixture.root.appendingPathComponent("Cache")); throw CheckFailure(description: "Running app should block replacement") } catch is UpdaterError { }
+            let original = try AppInventory().read(fixture.appURL.path)
+            try expect(original.version == "1.0" && original.build == "10")
+        }
+        await check("Sparkle installer binds to the trusted EdDSA key and rejects substitution or identity changes") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let key = Curve25519.Signing.PrivateKey()
+            let publicKey = key.publicKey.rawRepresentation.base64EncodedString()
+            _ =             _ = try fixture.sparkleApp(publicKey: publicKey)
+            try fixture.addExecutable()
+            let archive = try archiveFromFixture(fixture, version: "2.0", build: "20")
+            let signature = try key.signature(for: archive).base64EncodedString()
+            let plan = try installPlan(fixture: fixture, archive: archive, signature: signature, publicKey: publicKey)
+            let downloader = FakeSparkleDownloader(archive: archive)
+            // Substituting the installed trust key after review blocks installation.
+            let otherKey = Curve25519.Signing.PrivateKey()
+            var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: fixture.appURL.appendingPathComponent("Contents/Info.plist")), format: nil) as! [String: Any]
+            info["SUPublicEDKey"] = otherKey.publicKey.rawRepresentation.base64EncodedString()
+            try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: fixture.appURL.appendingPathComponent("Contents/Info.plist"), options: .atomic)
+            let keyInstaller = SparkleInstaller(downloader: downloader, isRunning: { _ in false })
+            do { _ = try await keyInstaller.install(plan, cacheRoot: fixture.root.appendingPathComponent("Cache")); throw CheckFailure(description: "Key substitution should be rejected") } catch is UpdaterError { }
+            // Changing installed version/build after review blocks installation.
+            let versionFixture = try Fixture(); defer { versionFixture.clean() }
+            _ = try versionFixture.sparkleApp(publicKey: publicKey)
+            try versionFixture.addExecutable()
+            try versionFixture.setVersion("1.1", build: "11")
+            let versionArchive = try archiveFromFixture(versionFixture, version: "2.0", build: "20")
+            let versionSignature = try key.signature(for: versionArchive).base64EncodedString()
+            let versionPlan = try installPlan(fixture: versionFixture, archive: versionArchive, signature: versionSignature, publicKey: publicKey)
+            let versionInstaller = SparkleInstaller(downloader: FakeSparkleDownloader(archive: archive), isRunning: { _ in false })
+            do { _ = try await versionInstaller.install(versionPlan, cacheRoot: versionFixture.root.appendingPathComponent("Cache")); throw CheckFailure(description: "Version change should be rejected") } catch is UpdaterError { }
+            // Changing bundle identity after review blocks installation.
+            let idFixture = try Fixture(); defer { idFixture.clean() }
+            _ = try idFixture.sparkleApp(publicKey: publicKey)
+            try idFixture.addExecutable()
+            try idFixture.setBundleID("changed.bundle.identity")
+            let idArchive = try archiveFromFixture(idFixture, version: "2.0", build: "20")
+            let idSignature = try key.signature(for: idArchive).base64EncodedString()
+            let idPlan = try installPlan(fixture: idFixture, archive: idArchive, signature: idSignature, publicKey: publicKey)
+            let idInstaller = SparkleInstaller(downloader: FakeSparkleDownloader(archive: archive), isRunning: { _ in false })
+            do { _ = try await idInstaller.install(idPlan, cacheRoot: idFixture.root.appendingPathComponent("Cache")); throw CheckFailure(description: "Bundle identity change should be rejected") } catch is UpdaterError { }
+        }
+        await check("Sparkle reviewed channel is preserved through prepare and execution") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let key = Curve25519.Signing.PrivateKey()
+            let publicKey = key.publicKey.rawRepresentation.base64EncodedString()
+            let defaultArchive = archiveForSparkle(appName: "Example.app", version: "2.0", build: "20", bundleID: try fixture.app().bundleID)
+            let betaArchive = archiveForSparkle(appName: "Example.app", version: "2.1", build: "21", bundleID: try fixture.app().bundleID)
+            let defaultSignature = try key.signature(for: defaultArchive).base64EncodedString()
+            let betaSignature = try key.signature(for: betaArchive).base64EncodedString()
+            let feed = String(decoding: appcast(
+                feedItemSigned(version: "2.0", edSignature: defaultSignature, length: defaultArchive.count) +
+                feedItemSigned("21", version: "2.1", edSignature: betaSignature, length: betaArchive.count, channel: "beta")
+            ), as: UTF8.self)
+            let loader = FixtureFeedLoader(feed)
+            var service = ScanService(runner: FakeRunner { _ in throw UpdaterError("No manager command expected") }, sourcePaths: [:])
+            service.sparkleChecker = SparkleCheck(loader: loader, macOS: "27.0", architecture: "arm64")
+            var prefs = Preferences(); prefs.scanRoots = [fixture.appURL.path]; prefs.includeSystemApplications = false; prefs.checkEmbeddedSparkleFeeds = true
+            _ = try fixture.sparkleApp(publicKey: publicKey)
+            try fixture.addExecutable()
+            // Default review selects the default-channel item.
+            let defaultResult = await service.scan(preferences: prefs)
+            try expect(defaultResult.apps[0].sparkleInstallRoute?.targetVersion == "2.0")
+            try expect(defaultResult.apps[0].sparkleInstallRoute?.channelReview == nil)
+            // Beta review selects the beta item and stores the review evidence.
+            var betaPrefs = prefs
+            betaPrefs.discoveryChannelReviews = [defaultResult.apps[0].id: DiscoveryChannelReview(path: defaultResult.apps[0].path, bundleID: defaultResult.apps[0].bundleID, teamIdentifier: "TEAMID1234", channel: "beta")]
+            let betaResult = await service.scan(preferences: betaPrefs)
+            try expect(betaResult.apps[0].sparkleInstallRoute?.targetVersion == "2.1")
+            try expect(betaResult.apps[0].sparkleInstallRoute?.channelReview?.channel == "beta")
+            // Prepare/execute with the beta route revalidates against the beta item.
+            let betaPlan = PlannedUpdate(app: betaResult.apps[0], preview: "")
+            let betaEngine = UpdateEngine(runner: FakeRunner { _ in throw UpdaterError("No manager command expected") }, sourcePaths: [:], sparkleFeedLoader: loader, sparkleInstaller: FakeSparkleInstaller { _ in
+                try fixture.write(version: "2.1", build: "21")
+                return try AppInventory().read(fixture.appURL.path)
+            }, isRunning: { _ in false })
+            let prepared = try await betaEngine.prepare([betaResult.apps[0]], preferences: betaPrefs)
+            try expect(prepared[0].app.sparkleInstallRoute?.targetVersion == "2.1")
+            let executed = await betaEngine.execute(betaPlan, cleanup: true) { _, _ in }
+            try expect(executed.state == .succeeded && executed.message.contains("2.1"))
+            // Changing the feed so the beta item differs breaks revalidation.
+            let changedArchive = archiveForSparkle(appName: "Example.app", version: "2.2", build: "22", bundleID: try fixture.app().bundleID)
+            let changedSignature = try key.signature(for: changedArchive).base64EncodedString()
+            let changedFeed = String(decoding: appcast(
+                feedItemSigned(version: "2.0", edSignature: defaultSignature, length: defaultArchive.count) +
+                feedItemSigned("22", version: "2.2", edSignature: changedSignature, length: changedArchive.count, channel: "beta")
+            ), as: UTF8.self)
+            let changedLoader = FixtureFeedLoader(changedFeed)
+            let changedEngine = UpdateEngine(runner: FakeRunner { _ in throw UpdaterError("No manager command expected") }, sourcePaths: [:], sparkleFeedLoader: changedLoader, sparkleInstaller: FakeSparkleInstaller { _ in throw UpdaterError("Should not install") }, isRunning: { _ in false })
+            do { _ = try await changedEngine.prepare([betaResult.apps[0]], preferences: betaPrefs); throw CheckFailure(description: "Changed beta target should fail revalidation") } catch is UpdaterError { }
+        }
+        await check("SparkleInstaller end-to-end with fake downloader and local Ed25519 key") {
+            let fixture = try Fixture(); defer { fixture.clean() }
+            let key = Curve25519.Signing.PrivateKey()
+            let publicKey = key.publicKey.rawRepresentation.base64EncodedString()
+            _ =             _ = try fixture.sparkleApp(publicKey: publicKey)
+            try fixture.addExecutable()
+            let archive = try archiveFromFixture(fixture, version: "2.0", build: "20")
+            let signature = try key.signature(for: archive).base64EncodedString()
+            let plan = try installPlan(fixture: fixture, archive: archive, signature: signature, publicKey: publicKey)
+            let cache = fixture.root.appendingPathComponent("Cache")
+            // Successful replacement.
+            let success = try await SparkleInstaller(downloader: FakeSparkleDownloader(archive: archive), isRunning: { _ in false }).install(plan, cacheRoot: cache)
+            try expect(success.version == "2.0" && success.build == "20")
+            // Wrong signature.
+            let wrongKey = Curve25519.Signing.PrivateKey()
+            let wrongSignature = try wrongKey.signature(for: archive).base64EncodedString()
+            let wrongPlan = try installPlan(fixture: fixture, archive: archive, signature: wrongSignature, publicKey: publicKey)
+            do { _ = try await SparkleInstaller(downloader: FakeSparkleDownloader(archive: archive), isRunning: { _ in false }).install(wrongPlan, cacheRoot: cache); throw CheckFailure(description: "Wrong signature should fail") } catch is UpdaterError { }
+            // Wrong bundle identity in archive.
+            let wrongIDArchive = try archiveFromFixture(fixture, version: "2.0", build: "20", bundleID: "wrong.bundle.identity")
+            let wrongIDSignature = try key.signature(for: wrongIDArchive).base64EncodedString()
+            let wrongIDPlan = try installPlan(fixture: fixture, archive: wrongIDArchive, signature: wrongIDSignature, publicKey: publicKey)
+            do { _ = try await SparkleInstaller(downloader: FakeSparkleDownloader(archive: wrongIDArchive), isRunning: { _ in false }).install(wrongIDPlan, cacheRoot: cache); throw CheckFailure(description: "Wrong identity should fail") } catch is UpdaterError { }
+            // Unsafe archive (traversal) is rejected before extraction replaces anything.
+            let unsafeArchive = storedZIP(appName: "Example.app", files: ["Example.app/../../etc/passwd": Data("evil".utf8)])
+            let unsafeSignature = try key.signature(for: unsafeArchive).base64EncodedString()
+            let unsafePlan = try installPlan(fixture: fixture, archive: unsafeArchive, signature: unsafeSignature, publicKey: publicKey)
+            do { _ = try await SparkleInstaller(downloader: FakeSparkleDownloader(archive: unsafeArchive), isRunning: { _ in false }).install(unsafePlan, cacheRoot: cache); throw CheckFailure(description: "Unsafe archive should fail") } catch is UpdaterError { }
+            // Rollback after post-move verification failure leaves original app intact.
+            let rollbackFixture = try Fixture(); defer { rollbackFixture.clean() }
+            _ = try rollbackFixture.sparkleApp(publicKey: publicKey)
+            try rollbackFixture.addExecutable()
+            let badTargetArchive = try archiveFromFixture(rollbackFixture, version: "1.5", build: "15")
+            let badTargetSignature = try key.signature(for: badTargetArchive).base64EncodedString()
+            let rollbackPlan = try installPlan(fixture: rollbackFixture, archive: badTargetArchive, signature: badTargetSignature, publicKey: publicKey)
+            do { _ = try await SparkleInstaller(downloader: FakeSparkleDownloader(archive: badTargetArchive), isRunning: { _ in false }).install(rollbackPlan, cacheRoot: rollbackFixture.root.appendingPathComponent("Cache")); throw CheckFailure(description: "Bad target should fail and rollback") } catch is UpdaterError { }
+            let restored = try AppInventory().read(rollbackFixture.appURL.path)
+            try expect(restored.version == "1.0" && restored.build == "10")
+
+            // Lookalike sibling paths are never overwritten, and an injected failure
+            // after moving the installed bundle to backup restores the original.
+            let swapFixture = try Fixture(); defer { swapFixture.clean() }
+            _ = try swapFixture.sparkleApp(publicKey: publicKey)
+            try swapFixture.addExecutable()
+            let swapArchive = try archiveFromFixture(swapFixture, version: "2.0", build: "20")
+            let swapSignature = try key.signature(for: swapArchive).base64EncodedString()
+            let swapPlan = try installPlan(fixture: swapFixture, archive: swapArchive, signature: swapSignature, publicKey: publicKey)
+            let stageLookalike = swapFixture.root.appendingPathComponent("Example.app.maccet-staged")
+            let backupLookalike = swapFixture.root.appendingPathComponent("Example.app.maccet-backup")
+            try Data("keep-stage".utf8).write(to: stageLookalike)
+            try Data("keep-backup".utf8).write(to: backupLookalike)
+            do {
+                _ = try await SparkleInstaller(downloader: FakeSparkleDownloader(archive: swapArchive), isRunning: { _ in false }, mutationBoundaryHook: { throw UpdaterError("injected swap failure") }).install(swapPlan, cacheRoot: swapFixture.root.appendingPathComponent("Cache"))
+                throw CheckFailure(description: "Injected swap failure should throw")
+            } catch is UpdaterError { }
+            let swapRestored = try AppInventory().read(swapFixture.appURL.path)
+            try expect(swapRestored.version == "1.0" && swapRestored.build == "10")
+            try expect(try Data(contentsOf: stageLookalike) == Data("keep-stage".utf8))
+            try expect(try Data(contentsOf: backupLookalike) == Data("keep-backup".utf8))
+
+            // Changes during download invalidate the reviewed plan before staging or replacement.
+            let changedFixture = try Fixture(); defer { changedFixture.clean() }
+            _ = try changedFixture.sparkleApp(publicKey: publicKey)
+            try changedFixture.addExecutable()
+            let changedArchive = try archiveFromFixture(changedFixture, version: "2.0", build: "20")
+            let changedSignature = try key.signature(for: changedArchive).base64EncodedString()
+            let changedPlan = try installPlan(fixture: changedFixture, archive: changedArchive, signature: changedSignature, publicKey: publicKey)
+            let mutatingDownloader = FakeSparkleDownloader(archive: changedArchive, onDownload: { try? changedFixture.setVersion("1.1", build: "11") })
+            do {
+                _ = try await SparkleInstaller(downloader: mutatingDownloader, isRunning: { _ in false }).install(changedPlan, cacheRoot: changedFixture.root.appendingPathComponent("Cache"))
+                throw CheckFailure(description: "Changed installed identity should invalidate the reviewed plan")
+            } catch is UpdaterError { }
+            let changedInstalled = try AppInventory().read(changedFixture.appURL.path)
+            try expect(changedInstalled.version == "1.1" && changedInstalled.build == "11")
+        }
+        await check("Sparkle archive inspector hardens against ambiguous and malformed ZIPs") {
+            try expect(SparkleArchiveDownloader.initialBufferCapacity(expectedLength: nil, responseLength: -1, limit: 1024) == 0)
+            try expect(SparkleArchiveDownloader.initialBufferCapacity(expectedLength: 10, responseLength: -1, limit: 1024) == 10)
+            let files = ["Example.app/Contents/Info.plist": appInfoPlist(version: "2.0", build: "20", bundleID: "test.sparkle.archive")]
+            let valid = storedZIP(appName: "Example.app", files: files)
+            let _ = try SparkleArchiveInspector.inspect(valid, maximumUncompressedBytes: 1024 * 1024)
+            try expectThrows { _ = try SparkleArchiveInspector.inspect(zipWithMismatchedLocalName(appName: "Example.app", files: files), maximumUncompressedBytes: 1024 * 1024) }
+            try expectThrows { _ = try SparkleArchiveInspector.inspect(zipWithEncryptedFlag(appName: "Example.app", files: files), maximumUncompressedBytes: 1024 * 1024) }
+            try expectThrows { _ = try SparkleArchiveInspector.inspect(zipWithZIP64Version(appName: "Example.app", files: files), maximumUncompressedBytes: 1024 * 1024) }
+            try expectThrows { _ = try SparkleArchiveInspector.inspect(zipWithZIP64Extra(appName: "Example.app", files: files), maximumUncompressedBytes: 1024 * 1024) }
+            try expectThrows { _ = try SparkleArchiveInspector.inspect(zipWithMalformedExtraField(appName: "Example.app", files: files), maximumUncompressedBytes: 1024 * 1024) }
+            try expectThrows { _ = try SparkleArchiveInspector.inspect(zipWithMalformedName(appName: "Example.app", files: files), maximumUncompressedBytes: 1024 * 1024) }
+            try expectThrows { _ = try SparkleArchiveInspector.inspect(zipWithTooManyEntries(appName: "Example.app"), maximumUncompressedBytes: 1024 * 1024) }
         }
         await check("Discovery refresh caches authenticated dated catalogs, limits requests and preserves valid offline results") {
             let fixture = try Fixture(); defer { fixture.clean() }

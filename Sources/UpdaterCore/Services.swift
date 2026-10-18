@@ -12,6 +12,18 @@ public struct ScanService {
         self.runner = runner; self.cacheRoot = cacheRoot
         self.sourcePaths = sourcePaths ?? ToolLocator.defaultSources()
     }
+    private func installableSparkleRoute(_ observation: SparkleObservation, app: AppRecord, release: SparkleSelectedRelease, review: DiscoveryChannelReview?) -> SparkleInstallRoute? {
+        guard observation.state == .updateAvailable,
+              let publicKeyFingerprint = SparkleTrustKey.ed25519PublicKeyFingerprint(at: app.path),
+              release.edSignature != nil,
+              release.archiveURL.hasSuffix(".zip"),
+              release.installationType == nil || release.installationType == "default",
+              let archiveURL = URL(string: release.archiveURL),
+              (try? SparkleFeedLoader.validateURL(archiveURL)) != nil else { return nil }
+        return SparkleInstallRoute(feedURL: app.sparkleFeed!, archiveURL: release.archiveURL, archiveLength: release.archiveLength,
+                                   edSignature: release.edSignature!, targetVersion: release.version, targetBuild: release.build,
+                                   channel: release.channel, channelReview: review, publicKeyFingerprint: publicKeyFingerprint)
+    }
     public func scan(preferences: Preferences, onPartial: ((ScanResult) async -> Void)? = nil) async -> ScanResult {
         let inventory = await Task.detached { AppInventory().discover(roots: preferences.inventoryRoots, includeSystem: preferences.includeSystemApplications ?? true) }.value
         let updateInventory = inventory.apps.filter { $0.state != .systemManaged }
@@ -87,29 +99,44 @@ public struct ScanService {
             }
         }
         // Embedded-feed observations cannot displace a manager or store receipt.
+        // A separately trusted local key can promote an observation to a narrow
+        // installable route; the observation alone never creates that route.
         var feedCount = 0
         let feedDeadline = ContinuousClock.now.advanced(by: .seconds(30))
         for index in result.apps.indices where preferences.checkEmbeddedSparkleFeeds == true && result.apps[index].sparkleFeed != nil
             && !result.apps[index].hasStoreReceipt && result.apps[index].state != .systemManaged
             && result.apps[index].vendorObservation == nil && (result.apps[index].routes ?? []).isEmpty {
             let observation: SparkleObservation
+            var selectedRelease: SparkleSelectedRelease?
             if Task.isCancelled {
                 observation = SparkleObservation(state: .failed, message: "Sparkle check canceled.")
             } else if feedCount >= 16 || ContinuousClock.now >= feedDeadline {
                 observation = SparkleObservation(state: .unsupported, message: "The Sparkle scan request/time budget was reached. This feed was not requested; choose a smaller scan folder to include it.")
             } else {
                 feedCount += 1
-                observation = await sparkleChecker.check(result.apps[index])
+                let review = preferences.discoveryChannelReviews?[result.apps[index].id]
+                let check = await sparkleChecker.checkWithRelease(result.apps[index], review: review)
+                observation = check.observation; selectedRelease = check.release
             }
             result.apps[index].sparkleObservation = observation
             result.apps[index].detail = observation.message
             result.apps[index].automatic = false
             switch observation.state {
             case .updateAvailable:
-                result.apps[index].state = .manual
-                result.apps[index].targetVersion = observation.version
-                result.apps[index].targetBuild = observation.build
-                result.apps[index].checkedAt = observation.date
+                if let release = selectedRelease, let route = installableSparkleRoute(observation, app: result.apps[index], release: release, review: preferences.discoveryChannelReviews?[result.apps[index].id]) {
+                    result.apps[index].sparkleInstallRoute = route
+                    result.apps[index].state = .updateAvailable
+                    result.apps[index].automatic = true
+                    result.apps[index].targetVersion = observation.version
+                    result.apps[index].targetBuild = observation.build
+                    result.apps[index].checkedAt = observation.date
+                    result.apps[index].detail = "Sparkle update available with a local EdDSA trust key. Review before installing."
+                } else {
+                    result.apps[index].state = .manual
+                    result.apps[index].targetVersion = observation.version
+                    result.apps[index].targetBuild = observation.build
+                    result.apps[index].checkedAt = observation.date
+                }
             case .current:
                 result.apps[index].state = .current
                 result.apps[index].checkedAt = observation.date
@@ -132,9 +159,15 @@ public struct UpdateEngine {
     public let runner: any CommandRunning
     public let cacheRoot: URL?
     public let sourcePaths: [UpdateSource: String]
-    public init(runner: any CommandRunning = ProcessRunner(), cacheRoot: URL? = nil, sourcePaths: [UpdateSource: String]? = nil) {
+    public var sparkleFeedLoader: any SparkleFeedLoading
+    public var sparkleInstaller: any SparkleInstalling
+    public var isRunning: (AppRecord) async -> Bool
+    public init(runner: any CommandRunning = ProcessRunner(), cacheRoot: URL? = nil, sourcePaths: [UpdateSource: String]? = nil, sparkleFeedLoader: any SparkleFeedLoading = SparkleFeedLoader(), sparkleInstaller: any SparkleInstalling = SparkleInstaller(), isRunning: @escaping (AppRecord) async -> Bool = Self.isRunning) {
         self.runner = runner; self.cacheRoot = cacheRoot
         self.sourcePaths = sourcePaths ?? ToolLocator.defaultSources()
+        self.sparkleFeedLoader = sparkleFeedLoader
+        self.sparkleInstaller = sparkleInstaller
+        self.isRunning = isRunning
     }
 
     public func prepare(_ apps: [AppRecord], preferences: Preferences) async throws -> [PlannedUpdate] {
@@ -144,6 +177,12 @@ public struct UpdateEngine {
             guard preferences.isEligible(app) else { throw UpdaterError("\(app.name) is no longer eligible for automatic updating.") }
             var plan = PlannedUpdate(app: app, preview: "")
             try plan.reviewedSignature.validate(at: app.path)
+            if let route = app.sparkleInstallRoute {
+                let release = try await revalidateSparkle(app, route: route)
+                try plan.reviewedSignature.validate(at: app.path)
+                plan.preview = "Sparkle update to \(release.version) (build \(release.build)) from the embedded feed.\n\n" + plan.reviewedSignature.reviewSummary
+                plans.append(plan); continue
+            }
             try plan.validateReviewedTool()
             _ = try await revalidate(app)
             let preview: String
@@ -161,6 +200,24 @@ public struct UpdateEngine {
         }
         guard !plans.isEmpty else { throw UpdaterError("There are no eligible updates in this selection.") }
         return plans
+    }
+
+    private func revalidateSparkle(_ app: AppRecord, route: SparkleInstallRoute) async throws -> SparkleSelectedRelease {
+        guard let feedURL = URL(string: route.feedURL),
+              let fingerprint = SparkleTrustKey.ed25519PublicKeyFingerprint(at: app.path),
+              fingerprint == route.publicKeyFingerprint else {
+            throw UpdaterError("The Sparkle trust key or feed URL changed. Rescan and review a new plan.")
+        }
+        let data = try await sparkleFeedLoader.load(feedURL)
+        guard let release = try SparkleCheck(loader: sparkleFeedLoader).selectedRelease(data, app: app, review: route.channelReview),
+              release.version == route.targetVersion, release.build == route.targetBuild,
+              release.edSignature == route.edSignature, release.archiveURL == route.archiveURL,
+              release.channel == route.channel,
+              release.installationType == nil || release.installationType == "default",
+              release.archiveURL.hasSuffix(".zip") else {
+            throw UpdaterError("The Sparkle target release or reviewed channel changed. Rescan and review a new plan.")
+        }
+        return release
     }
 
     public func revalidate(_ app: AppRecord, isolatedCache: URL? = nil) async throws -> AppRecord {
@@ -206,9 +263,13 @@ public struct UpdateEngine {
             defer { ownership.release() }
             try await onStage(.preflight, record.message)
             try plan.reviewedSignature.validate(at: app.path)
+            if let route = app.sparkleInstallRoute {
+                try await executeSparkle(plan, route: route, record: &record, ownedCache: &ownedCache, cleanup: cleanup, onStage: onStage)
+                return record
+            }
             try plan.validateReviewedTool()
             _ = try await revalidate(app)
-            guard !(await Self.isRunning(app)) else {
+            guard !(await isRunning(app)) else {
                 record.state = .deferred; record.message = "The app is still running. Close it and review a new update plan."; return record
             }
             if app.source == .homebrew {
@@ -275,6 +336,41 @@ public struct UpdateEngine {
         record.automaticAttentionMessage = snapshot.1
         return record
     }
+
+    private func executeSparkle(_ plan: PlannedUpdate, route: SparkleInstallRoute, record: inout ActivityRecord, ownedCache: inout OwnedUpdateCache?, cleanup: Bool, onStage: @escaping (TaskState, String) async throws -> Void) async throws {
+        let app = plan.app
+        let release = try await revalidateSparkle(app, route: route)
+        try plan.reviewedSignature.validate(at: app.path)
+        guard !(await isRunning(app)) else {
+            record.state = .deferred; record.message = "The app is still running. Close it and review a new update plan."; return
+        }
+        guard let publicKeyFingerprint = SparkleTrustKey.ed25519PublicKeyFingerprint(at: app.path),
+              publicKeyFingerprint == route.publicKeyFingerprint else {
+            throw UpdaterError("The Sparkle trust key changed after review. Rescan and review a new plan.")
+        }
+        let installPlan = try SparkleInstallPlan(app: app, release: release, publicKeyFingerprint: publicKeyFingerprint, channelReview: route.channelReview)
+        try await onStage(.installing, "Installing the reviewed Sparkle release.")
+        try plan.reviewedSignature.validate(at: app.path)
+        let base = cacheRoot ?? FileManager.default.temporaryDirectory.appendingPathComponent("UnifiedUpdater")
+        let cache = try OwnedUpdateCache(root: base.appendingPathComponent("Operations"))
+        ownedCache = cache
+        let updated = try await sparkleInstaller.install(installPlan, cacheRoot: cache.folder)
+        try await onStage(.verifying, "Reading the installed application again.")
+        guard Self.verify(before: app, after: updated) else {
+            throw UpdaterError("The Sparkle update finished, but the reviewed target could not be verified. No cleanup was performed.")
+        }
+        try plan.reviewedSignature.validate(at: app.path)
+        record.state = .succeeded; record.message = "Verified installed Sparkle target \(app.targetVersion ?? "")."
+        if cleanup, let ownedCache {
+            do {
+                try ownedCache.removeAfterVerification(verified: true)
+                record.cleanupMessage = "Removed this verified Sparkle update's isolated downloads and extracted archive."
+            } catch { record.cleanupMessage = "Update verified; cleanup failed: " + Diagnostics.redact(error.localizedDescription) }
+        } else {
+            record.cleanupMessage = "Cleanup disabled; existing Sparkle downloads were retained."
+        }
+    }
+
     /// A separate observation after a settled automatic attempt; it never rewrites
     /// the original attempt's outcome or removes its artifacts.
     public static func verifyAssisted(_ plan: PlannedUpdate) -> AssistedVerification {

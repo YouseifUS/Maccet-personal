@@ -31,6 +31,28 @@ public enum CheckState: String, Codable, CaseIterable {
     public var isChecked: Bool { [.current, .updateAvailable, .manual, .newerInstalled].contains(self) }
 }
 
+/// A validated Sparkle install route. Trust is established by the installed
+/// bundle's own EdDSA public key; this struct records the observed route and
+/// binds it to the trusted key fingerprint and reviewed channel evidence.
+public struct SparkleInstallRoute: Codable, Equatable {
+    public var feedURL: String
+    public var archiveURL: String
+    public var archiveLength: Int?
+    public var edSignature: String
+    public var targetVersion: String
+    public var targetBuild: String
+    public var channel: String?
+    public var channelReview: DiscoveryChannelReview?
+    public var publicKeyFingerprint: String
+    public var reviewedAt: Date
+    public init(feedURL: String, archiveURL: String, archiveLength: Int?, edSignature: String, targetVersion: String, targetBuild: String, channel: String?, channelReview: DiscoveryChannelReview? = nil, publicKeyFingerprint: String, reviewedAt: Date = Date()) {
+        self.feedURL = feedURL; self.archiveURL = archiveURL; self.archiveLength = archiveLength
+        self.edSignature = edSignature; self.targetVersion = targetVersion; self.targetBuild = targetBuild
+        self.channel = channel; self.channelReview = channelReview; self.publicKeyFingerprint = publicKeyFingerprint
+        self.reviewedAt = reviewedAt
+    }
+}
+
 public struct AppRecord: Codable, Identifiable, Equatable {
     public var id: String { path }
     public var name: String
@@ -42,6 +64,7 @@ public struct AppRecord: Codable, Identifiable, Equatable {
     public var sparkleFeed: String?
     public var sparkleRequiresSignedFeed: Bool?
     public var sparkleObservation: SparkleObservation?
+    public var sparkleInstallRoute: SparkleInstallRoute?
     public var source: UpdateSource?
     public var packageID: String?
     public var targetVersion: String?
@@ -65,7 +88,15 @@ public struct AppRecord: Codable, Identifiable, Equatable {
         self.hasStoreReceipt = hasStoreReceipt; self.sparkleFeed = sparkleFeed
     }
     public var hasUpdate: Bool { targetVersion != nil && [.updateAvailable, .manual].contains(state) }
-    public var releaseIdentity: String { "\(source?.rawValue ?? "unknown"):\(packageID ?? ""):\(targetVersion ?? "")" + (targetPackageVersion.map { ":package=" + $0 } ?? "") + (targetBuild.map { ":build=" + $0 } ?? "") + ((sourceEvidence?.channel).map { ":channel=" + $0 } ?? "") }
+    public var releaseIdentity: String {
+        let sourceIdentity: String = sparkleInstallRoute != nil ? "sparkle" : (source?.rawValue ?? "unknown")
+        let baseIdentity: String = sourceIdentity + ":\(packageID ?? ""):\(targetVersion ?? "")"
+        let packageComponent: String = targetPackageVersion.map { ":package=" + $0 } ?? ""
+        let buildComponent: String = targetBuild.map { ":build=" + $0 } ?? ""
+        let channelComponent: String = sourceEvidence?.channel.map { ":channel=" + $0 } ?? ""
+        let signatureComponent: String = sparkleInstallRoute.map { ":sig=" + String($0.edSignature.prefix(16)) } ?? ""
+        return baseIdentity + packageComponent + buildComponent + channelComponent + signatureComponent
+    }
 }
 
 public struct SourceHealth: Codable, Identifiable {
@@ -117,6 +148,7 @@ public struct Preferences: Codable {
         app.state == .updateAvailable && app.automatic && app.targetVersion != nil
             && !ignoredPaths.contains(app.id) && skippedReleases[app.id] != app.releaseIdentity
             && (app.sourceEvidence.map { $0.permitsManagerUpdate && $0.bundleID == app.bundleID } ?? true)
+            && (app.sparkleInstallRoute.map { $0.targetVersion == app.targetVersion && $0.targetBuild == app.targetBuild && $0.feedURL == app.sparkleFeed } ?? true)
     }
 }
 

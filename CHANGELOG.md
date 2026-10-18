@@ -2,8 +2,9 @@
 
 ## Unreleased
 
-- Launch checks source readiness without installing tools, refreshing indexes, or requesting authorization. Sources shows unavailable tools, canonical paths, versions, and failures; **Prepare Sources** starts installation and maintenance explicitly.
-- Readiness checks and scans preserve usable inventory when prerequisites are missing. Quit protection applies to active maintenance and update queues; partial preparation retains **Retry Setup**.
+- Launch checks source readiness without installing tools, refreshing indexes, or requesting authorization. Sources shows unavailable tools, canonical paths, versions, and failures.
+- Split source maintenance into **Install Missing Tools** (adds missing tools without upgrading installed ones) and **Upgrade Source Tools** (updates installed Homebrew/MacPorts/mas and refreshes their local metadata). Application updates remain in their reviewed update flow.
+- Readiness checks and scans preserve usable inventory when prerequisites are missing. Quit protection applies during maintenance and update queues; partial failures can be retried for the same action.
 
 ## 0.1.2 — 2026-10-16
 

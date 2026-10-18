@@ -30,7 +30,7 @@ public struct ScanService {
                 result.sources.append(SourceHealth(source: source, executable: sourcePaths[source], available: sourcePaths[source] != nil, message: message, checkRequired: false)); continue
             }
             guard let executable = sourcePaths[source] else {
-                result.sources.append(SourceHealth(source: source, message: "\(source.title) not installed. Open Sources and choose Prepare Sources.", checkRequired: true)); continue
+                result.sources.append(SourceHealth(source: source, message: "\(source.title) not installed. Open Sources and choose Install Missing Tools.", checkRequired: true)); continue
             }
             var health = SourceHealth(source: source, executable: executable, available: true, message: "Available", checkRequired: true)
             do {
@@ -42,7 +42,7 @@ public struct ScanService {
                     health.message = "Managed casks checked, including self-updating casks. Catalog metadata may lag upstream releases."
                 } else if source == .macPorts {
                     records = try await MacPortsAdapter(executable: executable, runner: runner).check(apps: updateInventory)
-                    health.message = "Installed-file ownership checked against the local ports index. Choose Prepare Sources in Sources to refresh a stale index."
+                    health.message = "Installed-file ownership checked against the local ports index. Choose Refresh Metadata in Sources to refresh a stale index, or Upgrade Source Tools to update MacPorts itself."
                 } else {
                     records = try await AppStoreAdapter(executable: executable, runner: runner).check(apps: updateInventory)
                     health.message = "Receipt, bundle identity, and installed path matched. Apple's lookup may lag store availability."

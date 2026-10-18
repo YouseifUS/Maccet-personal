@@ -29,7 +29,7 @@ enum SourceToolVersion {
         let regex = try NSRegularExpression(pattern: pattern)
         guard let match = regex.firstMatch(in: candidate, range: NSRange(candidate.startIndex..., in: candidate)),
               let range = Range(match.range(at: 1), in: candidate) else {
-            throw UpdaterError("\(source.toolName) returned an unrecognized version. Choose Prepare Sources or update the tool manually. Diagnostic: " + Diagnostics.redact(text).prefixString(3500))
+            throw UpdaterError("\(source.toolName) returned an unrecognized version. Choose Install Missing Tools, Upgrade Source Tools, or update the tool manually. Diagnostic: " + Diagnostics.redact(text).prefixString(3500))
         }
         let version = String(candidate[range])
         guard let comparison = ReleaseComparison.compare(version, minimum), comparison != .orderedAscending else {

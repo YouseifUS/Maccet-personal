@@ -82,13 +82,25 @@ public struct DependencySetup {
     private func versionMessage(tool: String, version: String) -> String {
         (tool == "brew" ? "Homebrew " : tool == "port" ? "MacPorts " : "mas ") + version
     }
+    /// Installs missing source tools and their dependencies without upgrading
+    /// already-installed tools or the App Store helper.
+    public func installMissingTools(inventory: InventoryResult? = nil, disabledSources: Set<UpdateSource> = [], includeMacPorts: Bool = false, retrying previousItems: [SetupItem]? = nil, progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
+        await run(inventory: inventory, disabledSources: disabledSources, retrying: previousItems, installMissing: true, upgradeTools: false, includeMacPorts: includeMacPorts, progress: progress)
+    }
+    /// Upgrades installed source tools and refreshes their local metadata. It does
+    /// not install missing managers or upgrade user applications.
+    public func upgradeSourceTools(inventory: InventoryResult? = nil, disabledSources: Set<UpdateSource> = [], includeMacPorts: Bool = false, retrying previousItems: [SetupItem]? = nil, progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
+        await run(inventory: inventory, disabledSources: disabledSources, retrying: previousItems, installMissing: false, upgradeTools: true, includeMacPorts: includeMacPorts, progress: progress)
+    }
+    /// Convenience path that installs missing tools and then upgrades installed ones.
+    /// New UI should call the separated intents directly.
     public func prepare(inventory: InventoryResult? = nil, disabledSources: Set<UpdateSource> = [], includeMacPorts: Bool = false, retrying previousItems: [SetupItem]? = nil, progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
-        await run(inventory: inventory, disabledSources: disabledSources, retrying: previousItems, prepareTools: true, includeMacPorts: includeMacPorts, progress: progress)
+        await run(inventory: inventory, disabledSources: disabledSources, retrying: previousItems, installMissing: true, upgradeTools: true, includeMacPorts: includeMacPorts, progress: progress)
     }
     public func checkReadiness(inventory: InventoryResult? = nil, disabledSources: Set<UpdateSource> = [], progress: @escaping ([SetupItem]) async -> Void = { _ in }) async -> [SetupItem] {
-        await run(inventory: inventory, disabledSources: disabledSources, retrying: nil, prepareTools: false, includeMacPorts: false, progress: progress)
+        await run(inventory: inventory, disabledSources: disabledSources, retrying: nil, installMissing: false, upgradeTools: false, includeMacPorts: false, progress: progress)
     }
-    private func run(inventory: InventoryResult?, disabledSources: Set<UpdateSource>, retrying previousItems: [SetupItem]?, prepareTools: Bool, includeMacPorts: Bool, progress: @escaping ([SetupItem]) async -> Void) async -> [SetupItem] {
+    private func run(inventory: InventoryResult?, disabledSources: Set<UpdateSource>, retrying previousItems: [SetupItem]?, installMissing: Bool, upgradeTools: Bool, includeMacPorts: Bool, progress: @escaping ([SetupItem]) async -> Void) async -> [SetupItem] {
         // Reuse successful preparation only for an explicit retry in this session.
         var items = Self.initialItems.map { initial in
             guard let ready = previousItems?.first(where: { $0.id == initial.id && $0.phase == .ready }) else { return initial }
@@ -108,7 +120,7 @@ public struct DependencySetup {
             let canonicalPath = ToolLocator.canonicalPath(executable)
             let version = try await probeVersion(executable, tool: items[index].id)
             guard locate(items[index].id).map(ToolLocator.canonicalPath) == canonicalPath else {
-                throw UpdaterError("The tool location changed during its readiness check. Retry Setup.")
+                throw UpdaterError("The tool location changed during its readiness check. Retry the selected source-tools action.")
             }
             items[index].executablePath = canonicalPath
             items[index].version = Diagnostics.redact(version)
@@ -128,8 +140,9 @@ public struct DependencySetup {
         }
         let needsMas = requestedSources.contains(.appStore)
         let masUsesPorts = needsMas && locate("mas") == "/opt/local/bin/mas"
-        let needsBrew = requestedSources.contains(.homebrew) || (prepareTools && needsMas && !masUsesPorts)
-        let needsPorts = requestedSources.contains(.macPorts) || (prepareTools && masUsesPorts)
+        let preparing = installMissing || upgradeTools
+        let needsBrew = requestedSources.contains(.homebrew) || (preparing && needsMas && !masUsesPorts)
+        let needsPorts = requestedSources.contains(.macPorts) || (preparing && masUsesPorts)
         // Presence alone cannot validate a cached success. Probe only required
         // tools; healthy results skip maintenance, stale results use normal repair.
         // Finish these checks before publishing cached ready states in progress.
@@ -155,7 +168,7 @@ public struct DependencySetup {
             await report(0, .notRequired, "No source requires developer tools for this inventory.")
             return items
         }
-        if !prepareTools {
+        if !preparing {
             if needsBrew || needsPorts {
                 await report(0, .running, "Checking Apple developer tools…")
                 do {
@@ -166,7 +179,7 @@ public struct DependencySetup {
                     guard directory.hasPrefix("/") else { throw UpdaterError("No developer tools directory is selected.") }
                     await report(0, .ready, "Developer tools directory is selected. Preparation checks the compiler before maintenance.")
                 } catch {
-                    await report(0, .unavailable, "Apple developer tools are unavailable. Choose Prepare Sources to request Apple's installer. " + error.localizedDescription)
+                    await report(0, .unavailable, "Apple developer tools are unavailable. Choose Install Missing Tools to request Apple's installer. " + error.localizedDescription)
                 }
             } else {
                 await report(0, .notRequired, "App Store readiness is checked directly; developer tools are checked when source maintenance needs them.")
@@ -175,7 +188,7 @@ public struct DependencySetup {
             // This path never installs, refreshes metadata, or requests authorization.
             for (index, needed) in [(1, needsBrew), (2, needsPorts), (3, needsMas)] where needed {
                 guard let executable = locate(items[index].id) else {
-                    await report(index, .unavailable, "Not installed. Choose Prepare Sources to install this tool.")
+                    await report(index, .unavailable, "Not installed. Choose Install Missing Tools to add this source.")
                     continue
                 }
                 await report(index, .running, "Checking \(items[index].title) readiness…")
@@ -184,62 +197,88 @@ public struct DependencySetup {
             }
             return items
         }
-        await report(0, .running, "Checking Apple developer tools…")
-        do {
-            _ = try await command("/usr/bin/xcrun", ["--find", "clang"], timeout: 20)
-            await report(0, .ready, "Developer tools are available")
-        } catch {
-            // Apple owns the download, license, and installation UI.
-            _ = try? await command("/usr/bin/xcode-select", ["--install"], timeout: 20)
-            await report(0, .failed, "Complete Apple's developer tools installer, then choose Retry Setup.")
-            for index in 1..<items.count where items[index].phase != .disabled && items[index].phase != .notRequired {
-                await report(index, .failed, "Waiting for Apple developer tools. Retry Setup after installation.")
+        if installMissing {
+            await report(0, .running, "Checking Apple developer tools…")
+            do {
+                _ = try await command("/usr/bin/xcrun", ["--find", "clang"], timeout: 20)
+                await report(0, .ready, "Developer tools are available")
+            } catch {
+                // Apple owns the download, license, and installation UI.
+                _ = try? await command("/usr/bin/xcode-select", ["--install"], timeout: 20)
+                await report(0, .failed, "Complete Apple's developer tools installer, then retry.")
+                for index in 1..<items.count where items[index].phase != .disabled && items[index].phase != .notRequired {
+                    await report(index, .failed, "Waiting for Apple developer tools. Retry after installation.")
+                }
+                return items
             }
-            return items
+        } else {
+            // Upgrading installed source tools does not use the developer-tools installer.
+            await report(0, .notRequired, "Upgrading installed source tools does not install Apple developer tools.")
         }
         var brew: String? = items[1].phase == .ready ? locate("brew") : nil
         if needsBrew && items[1].phase != .ready {
-            await report(1, .running, locate("brew") == nil ? "Downloading and installing Homebrew…" : "Updating Homebrew…")
-            do {
-                if locate("brew") == nil {
-                    guard architecture == "arm64" else {
-                        throw UpdaterError("Homebrew's automatic package installer requires Apple Silicon. Install Homebrew from brew.sh on this Intel Mac, then Retry Setup.")
+            let isInstalled = locate("brew") != nil
+            if !isInstalled && !installMissing {
+                await report(1, .failed, "Homebrew is not installed. Install missing tools before upgrading.")
+            } else {
+                let runningMessage = !isInstalled ? "Downloading and installing Homebrew…" : (upgradeTools ? "Upgrading Homebrew and refreshing its metadata…" : "Checking Homebrew…")
+                await report(1, .running, runningMessage)
+                do {
+                    if !isInstalled {
+                        guard architecture == "arm64" else {
+                            throw UpdaterError("Homebrew's automatic package installer requires Apple Silicon. Install Homebrew from brew.sh on this Intel Mac, then retry.")
+                        }
+                        try await installPackage(repository: "Homebrew/brew", tool: "brew")
                     }
-                    try await installPackage(repository: "Homebrew/brew", tool: "brew")
-                }
-                guard let executable = locate("brew") else { throw UpdaterError("Homebrew installation finished but brew was not found in a supported location.") }
-                try await script(["brew-update", executable])
-                try await confirmReady(1, executable: executable)
-                brew = executable
-            } catch { await report(1, .failed, error.localizedDescription) }
+                    guard let executable = locate("brew") else { throw UpdaterError("Homebrew installation finished but brew was not found in a supported location.") }
+                    if upgradeTools { try await script(["brew-update", executable]) }
+                    try await confirmReady(1, executable: executable)
+                    brew = executable
+                } catch { await report(1, .failed, error.localizedDescription) }
+            }
         }
 
         if needsPorts && items[2].phase != .ready {
-            await report(2, .running, locate("port") == nil ? "Downloading and installing MacPorts…" : "Updating MacPorts and its index…")
-            do {
-                if locate("port") == nil { try await installPackage(repository: "macports/macports-base", tool: "port") }
-                guard let executable = locate("port") else { throw UpdaterError("MacPorts installation finished but /opt/local/bin/port was not found.") }
-                try await script(["ports-update"])
-                try await confirmReady(2, executable: executable)
-            } catch { await report(2, .failed, error.localizedDescription) }
+            let isInstalled = locate("port") != nil
+            if !isInstalled && !installMissing {
+                await report(2, .failed, "MacPorts is not installed. Install missing tools before upgrading.")
+            } else {
+                let runningMessage = !isInstalled ? "Downloading and installing MacPorts…" : (upgradeTools ? "Upgrading MacPorts and refreshing its port definitions…" : "Checking MacPorts…")
+                await report(2, .running, runningMessage)
+                do {
+                    if !isInstalled { try await installPackage(repository: "macports/macports-base", tool: "port") }
+                    guard let executable = locate("port") else { throw UpdaterError("MacPorts installation finished but /opt/local/bin/port was not found.") }
+                    if upgradeTools { try await script(["ports-update"]) }
+                    try await confirmReady(2, executable: executable)
+                } catch { await report(2, .failed, error.localizedDescription) }
+            }
         }
 
         if needsMas && items[3].phase != .ready {
-            await report(3, .running, "Installing or updating the App Store helper…")
-            do {
-                // Keep an existing MacPorts-owned mas under that manager.
-                if locate("mas") == "/opt/local/bin/mas" {
-                    guard items[2].phase == .ready else { throw UpdaterError("MacPorts setup must succeed before updating its mas helper.") }
-                    try await script(["ports-mas-update"])
-                } else {
-                    guard let brew else { throw UpdaterError("Homebrew setup must succeed before installing or updating mas.") }
-                    let installed = try await runner.run(brew, ["list", "--formula", "--versions", "mas"], environment: environment, timeout: 30)
-                    let action = installed.status == 0 && !installed.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "mas-update" : "mas-install"
-                    try await script([action, brew])
-                }
-                guard let executable = locate("mas") else { throw UpdaterError("mas could not be found after installation.") }
-                try await confirmReady(3, executable: executable)
-            } catch { await report(3, .failed, error.localizedDescription) }
+            let masPath = locate("mas")
+            let isInstalled = masPath != nil
+            if !isInstalled && !installMissing {
+                await report(3, .failed, "mas is not installed. Install missing tools before upgrading.")
+            } else {
+                let runningMessage = !isInstalled ? "Installing the App Store helper…" : (upgradeTools ? "Upgrading the App Store helper…" : "Checking the App Store helper…")
+                await report(3, .running, runningMessage)
+                do {
+                    // Keep an existing MacPorts-owned mas under that manager.
+                    if masPath == "/opt/local/bin/mas" {
+                        guard items[2].phase == .ready else { throw UpdaterError("MacPorts setup must succeed before updating its mas helper.") }
+                        if upgradeTools { try await script(["ports-mas-update"]) }
+                    } else {
+                        guard let brew else { throw UpdaterError("Homebrew setup must succeed before installing or updating mas.") }
+                        if isInstalled {
+                            if upgradeTools { try await script(["mas-update", brew]) }
+                        } else {
+                            try await script(["mas-install", brew])
+                        }
+                    }
+                    guard let executable = locate("mas") else { throw UpdaterError("mas could not be found after installation.") }
+                    try await confirmReady(3, executable: executable)
+                } catch { await report(3, .failed, error.localizedDescription) }
+            }
         }
 
         return items

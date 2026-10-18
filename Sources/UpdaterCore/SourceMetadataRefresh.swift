@@ -1,7 +1,7 @@
 import Foundation
 
 /// Refresh requests only use installed tools; installation and tool upgrades
-/// remain explicit preparation operations with their own results.
+/// remain separate explicit source-maintenance operations with their own results.
 public struct SourceMetadataRefresh {
     public static var initialItems: [SetupItem] {
         UpdateSource.allCases.map { SetupItem(id: $0.toolName, title: $0.title) }
@@ -35,7 +35,7 @@ public struct SourceMetadataRefresh {
                 await report(index, .notRequired, "App Store has no local package index. Application scans query its live service."); continue
             }
             guard let executable = locate(source.toolName) else {
-                await report(index, .unavailable, "Install or update this source tool through Prepare Sources, then refresh its metadata."); continue
+                await report(index, .unavailable, "Not installed. Choose Install Missing Tools, then refresh its metadata."); continue
             }
             await report(index, .running, "Refreshing \(source.title) metadata…")
             do {

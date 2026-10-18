@@ -38,16 +38,37 @@ struct SetupSteps: View {
 }
 struct SetupPage: View {
     @EnvironmentObject var model: AppModel
+    private var title: String {
+        switch model.setupAction {
+        case .installMissing: return "Installing missing source tools"
+        case .upgradeTools: return "Upgrading source tools"
+        default: return "Checking source readiness"
+        }
+    }
+    private var subtitle: String {
+        switch model.setupAction {
+        case .installMissing: return "Adding only missing tools without upgrading already-installed sources."
+        case .upgradeTools: return "Updating installed Homebrew, MacPorts and mas. These commands also refresh local metadata."
+        default: return "Checking installed tools before scanning applications."
+        }
+    }
+    private var footer: String {
+        switch model.setupAction {
+        case .installMissing: return "macOS may ask for administrator permission to install missing tools. Keep Maccet open until installers finish."
+        case .upgradeTools: return "Upgrading tools does not install missing managers or upgrade your applications."
+        default: return "Use Sources to install or maintain tools. Launch checks do not request authorization."
+        }
+    }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 BrandIcon(size: 64)
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(model.maintainingSources ? "Preparing update sources" : "Checking source readiness").font(.system(size: 28, weight: .semibold))
-                    Text(model.maintainingSources ? "Installing and maintaining sources required by discovered applications." : "Checking installed tools before scanning applications.").font(.system(size: 13)).foregroundStyle(Maccet.secondary)
+                    Text(title).font(.system(size: 28, weight: .semibold))
+                    Text(subtitle).font(.system(size: 13)).foregroundStyle(Maccet.secondary)
                 }
                 Surface { SetupSteps() }
-                Label(model.maintainingSources ? "macOS may ask for administrator permission. Keep Maccet open until installers finish." : "Use Sources to install or maintain tools. Launch checks do not request authorization.", systemImage: "lock.shield").font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
+                Label(footer, systemImage: "lock.shield").font(.system(size: 12)).foregroundStyle(Maccet.secondary).fixedSize(horizontal: false, vertical: true)
             }.frame(maxWidth: 680, alignment: .leading).padding(40).frame(maxWidth: .infinity)
         }
     }
@@ -88,16 +109,19 @@ struct SourcesPage: View {
                         HStack {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text("Source tools and preparation").font(.system(size: 15, weight: .semibold))
-                                Text("Launch checks readiness. Prepare Sources can install tools, update Homebrew/MacPorts and mas, and refresh their catalogs.").font(.system(size: 12)).foregroundStyle(Maccet.secondary)
+                                Text("Launch checks readiness. Install Missing Tools adds only missing tools without upgrading installed ones. Upgrade Source Tools updates installed Homebrew, MacPorts and mas, which also refreshes their local metadata.").font(.system(size: 12)).foregroundStyle(Maccet.secondary)
                             }
                             Spacer()
-                            Button(model.setupActionTitle, action: model.prepareSources).disabled(model.busy)
+                            VStack(alignment: .trailing, spacing: 8) {
+                                Button(model.installMissingTitle, action: model.installMissingSourceTools).disabled(model.busy)
+                                Button(model.upgradeToolsTitle, action: model.upgradeSourceTools).disabled(model.busy)
+                            }
                         }
                         if model.sources.first(where: { $0.source == .macPorts })?.available != true {
                             Toggle("Include optional MacPorts installation", isOn: $model.includeMacPortsInPreparation)
                                 .toggleStyle(.checkbox).font(.system(size: 12))
                                 .disabled(model.busy || model.preferences.disabledSources.contains(.macPorts))
-                            Text("Choose this if you use MacPorts, then prepare sources. Other applications do not require installing this manager.")
+                            Text("Choose this if you use MacPorts, then install or upgrade its tool. Other applications do not require installing this manager.")
                                 .font(.system(size: 12)).foregroundStyle(Maccet.secondary)
                         }
                         DisclosureGroup("Readiness and preparation results", isExpanded: $showSteps) { SetupSteps() }

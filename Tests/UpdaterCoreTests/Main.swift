@@ -2468,6 +2468,47 @@ private enum Checks {
             try expect(result[1].phase == .failed && result[2].phase == .ready)
             try expect(!fixture.actions.contains("install-package"))
         }
+        await check("Install Missing Tools does not upgrade already-installed tools or mas") {
+            let fixture = SetupFixture()
+            let result = await fixture.service().installMissingTools()
+            try expect(result.allSatisfy { $0.phase == .ready })
+            try expect(fixture.actions.isEmpty, "Install Missing Tools upgraded installed tools")
+        }
+        await check("Install Missing Tools installs only the missing helper route without manager self-updates") {
+            let fixture = SetupFixture(); fixture.paths.removeValue(forKey: "brew"); fixture.paths.removeValue(forKey: "mas")
+            let result = await fixture.service().installMissingTools()
+            try expect(result.allSatisfy { $0.phase == .ready })
+            try expect(fixture.actions == ["install-package", "mas-install"], "Missing-tool install performed manager upgrades")
+        }
+        await check("Upgrade Source Tools updates installed tools, refreshes metadata, and does not install missing managers") {
+            let fixture = SetupFixture()
+            let result = await fixture.service().upgradeSourceTools()
+            try expect(result[1].phase == .ready && result[2].phase == .ready && result[3].phase == .ready)
+            try expect(fixture.actions == ["brew-update", "ports-update", "mas-update"])
+            try expect(result[1].message.contains("Homebrew") && result[2].message.contains("MacPorts"))
+        }
+        await check("Upgrade Source Tools fails a missing required manager instead of installing it") {
+            let fixture = SetupFixture(); fixture.paths.removeValue(forKey: "brew")
+            let result = await fixture.service().upgradeSourceTools()
+            try expect(result[1].phase == .failed && result[1].message.contains("not installed"))
+            try expect(!fixture.actions.contains("install-package"), "Upgrade installed a missing manager")
+            try expect(result[2].phase == .ready && result[3].phase == .failed, "Dependent/remaining steps were not handled truthfully")
+        }
+        await check("Upgrade Source Tools touches only enabled sources") {
+            let fixture = SetupFixture(); fixture.paths = ["brew": "/opt/homebrew/bin/brew"]
+            let result = await fixture.service().upgradeSourceTools(disabledSources: [.macPorts, .appStore])
+            try expect(fixture.actions == ["brew-update"])
+            try expect(result[1].phase == .ready && result[2].phase == .disabled && result[3].phase == .disabled)
+        }
+        await check("Retry on separated intents preserves unrelated ready work") {
+            let fixture = SetupFixture(); fixture.failBrew = true
+            let first = await fixture.service().upgradeSourceTools()
+            try expect(first[1].phase == .failed && first[2].phase == .ready && first[3].phase == .failed)
+            fixture.failBrew = false
+            let retried = await fixture.service().upgradeSourceTools(retrying: first)
+            try expect(retried[1].phase == .ready && retried[2].phase == .ready && retried[3].phase == .ready)
+            try expect(fixture.actions == ["brew-update", "ports-update", "brew-update", "mas-update"], "Retry repeated successful manager upgrades")
+        }
         await check("Official installer selection rejects wrong OS, foreign URLs, missing digests, and duplicate matches") {
             let digest = "sha256:" + String(repeating: "a", count: 64)
             func metadata(name: String, url: String, hash: String?, copies: Int = 1) throws -> Data {

@@ -6,7 +6,7 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
     if !condition() { throw Failed(message: message) }
 }
 private final class SetupRunner: CommandRunning {
-    var failPorts = true
+    var failPorts = false
     var toolsMissing = false
     var masVersion = "7.0.0"
     var actions: [String] = []
@@ -84,7 +84,7 @@ private final class SetupRunner: CommandRunning {
             print("PASS Opening the app checks readiness without maintenance")
             let beforeSecondWindow = runner.calls
             startup.start(); try await wait(startup)
-            try expect(runner.calls == beforeSecondWindow && startup.setupActionTitle == "Prepare Sources", "Another window repeated startup or offered a retry before preparation")
+            try expect(runner.calls == beforeSecondWindow, "Another window repeated startup or offered a retry before preparation")
             print("PASS Another window does not repeat readiness or maintenance")
             let missingRunner = SetupRunner(); missingRunner.toolsMissing = true
             let missing = AppModel(runner: missingRunner, setupLocate: { _ in nil })
@@ -99,30 +99,44 @@ private final class SetupRunner: CommandRunning {
             try expect(missingApple.setupItems[0].phase == .unavailable && missingApple.setupItems.dropFirst().allSatisfy { $0.phase == .ready }, "Missing Apple tools hid working sources")
             try expect(missingRunner.actions.isEmpty && missingApple.lastScan != nil, "Apple-tools readiness requested maintenance")
             print("PASS Missing Apple tools do not hide working source tools")
-            let model = session()
-            runner.beforeSetup = { try expect(model.apps.count == 2, "Preparation ran before inventory was published") }
-            model.prepareSources()
-            try expect(model.maintainingSources, "Explicit preparation was not marked as active maintenance")
-            try await wait(model)
+
+            let upgrade = session()
+            runner.failPorts = true
+            runner.beforeSetup = { try expect(upgrade.apps.count == 2, "Upgrade ran before inventory was published") }
+            upgrade.upgradeSourceTools()
+            try expect(upgrade.maintainingSources, "Explicit upgrade was not marked as active maintenance")
+            try await wait(upgrade)
             runner.beforeSetup = nil
-            try expect(model.setupItems[1].phase == .ready && model.setupItems[2].phase == .failed && model.setupItems[3].phase == .ready, "Partial setup result was lost")
-            print("PASS Partial source failure remains visible")
+            try expect(upgrade.setupItems[1].phase == .ready && upgrade.setupItems[2].phase == .failed && upgrade.setupItems[3].phase == .ready, "Partial upgrade result was lost")
+            print("PASS Partial source-tool upgrade failure remains visible")
 
             runner.failPorts = false
-            model.prepareSources()
-            try expect(model.setupItems[1].phase == .ready && model.setupItems[3].phase == .ready, "Ready tools reset while retry started")
-            try await wait(model)
-            try expect(model.setupItems.allSatisfy { $0.phase == .ready }, "Retry did not recover failed setup")
+            upgrade.upgradeSourceTools()
+            try expect(upgrade.setupItems[1].phase == .ready && upgrade.setupItems[3].phase == .ready, "Ready tools reset while retry started")
+            try await wait(upgrade)
+            try expect(!upgrade.setupNeedsAttention && upgrade.setupItems[1].phase == .ready && upgrade.setupItems[2].phase == .ready && upgrade.setupItems[3].phase == .ready, "Retry did not recover failed upgrade")
             try expect(runner.actions == ["brew-update", "ports-update", "mas-update", "ports-update"], "GUI retry repeated successful maintenance")
-            try expect(model.lastScan != nil, "Retry did not finish with a source scan")
-            print("PASS GUI retry prepares only the failed source and rescans")
+            try expect(upgrade.lastScan != nil, "Retry did not finish with a source scan")
+            print("PASS GUI retry upgrades only the failed source and rescans")
 
             let fresh = session()
             fresh.start(); try await wait(fresh)
-            try expect(runner.actions.count == 4 && fresh.setupActionTitle == "Prepare Sources", "A new launch performed maintenance or reused a preparation result")
-            fresh.prepareSources(); try await wait(fresh)
+            try expect(runner.actions.count == 4, "A new launch performed maintenance or reused a preparation result")
+            fresh.installMissingSourceTools(); try await wait(fresh)
+            try expect(runner.actions.count == 4, "Install Missing Tools upgraded already-installed source tools")
+            try expect(fresh.setupItems.allSatisfy { $0.phase == .ready }, "Install missing did not confirm installed tools ready")
+            fresh.upgradeSourceTools(); try await wait(fresh)
             try expect(Array(runner.actions.suffix(3)) == ["brew-update", "ports-update", "mas-update"] && runner.actions.count == 7, "A fresh session reused previous setup success")
-            print("PASS A fresh session checks readiness and explicitly requested preparation runs in full")
+            print("PASS A fresh session checks readiness, installs missing tools without upgrades, then upgrades source tools")
+
+            let installMissing = session()
+            installMissing.preferences.disabledSources = [.macPorts, .appStore]
+            let actionsBeforeInstall = runner.actions.count
+            installMissing.installMissingSourceTools(); try await wait(installMissing)
+            try expect(runner.actions.count == actionsBeforeInstall, "Install Missing Tools upgraded an already-installed source")
+            try expect(installMissing.setupItems[1].phase == .ready && installMissing.setupItems[2].phase == .disabled && installMissing.setupItems[3].phase == .disabled && !installMissing.setupNeedsAttention, "Disabled steps were presented as failures or installed tools were changed")
+            print("PASS Install Missing Tools does not upgrade already-installed sources")
+
             let disabled = session()
             disabled.preferences.disabledSources = Set(UpdateSource.allCases)
             let callsBefore = runner.calls
@@ -130,13 +144,15 @@ private final class SetupRunner: CommandRunning {
             try expect(runner.calls == callsBefore, "Disabled sources still triggered preparation commands")
             try expect(!disabled.setupNeedsAttention && disabled.lastScan != nil, "Disabled setup prevented inventory or required attention")
             print("PASS Disabling every source skips setup commands and preserves inventory")
+
             let homebrewOnly = session()
             homebrewOnly.preferences.disabledSources = [.macPorts, .appStore]
             let actionsBefore = runner.actions.count
-            homebrewOnly.prepareSources(); try await wait(homebrewOnly)
-            try expect(runner.actions.count == actionsBefore + 1 && runner.actions.last == "brew-update", "Single-source settings were not passed to preparation")
+            homebrewOnly.upgradeSourceTools(); try await wait(homebrewOnly)
+            try expect(runner.actions.count == actionsBefore + 1 && runner.actions.last == "brew-update", "Single-source settings were not passed to upgrade")
             try expect(homebrewOnly.setupItems[2].phase == .disabled && homebrewOnly.setupItems[3].phase == .disabled && !homebrewOnly.setupNeedsAttention, "Disabled steps were presented as failures")
-            print("PASS GUI setup prepares only the enabled source")
+            print("PASS GUI upgrade prepares only the enabled source")
+
             let empty = session()
             empty.preferences.scanRoots = []
             let beforeEmpty = runner.actions.count
@@ -147,59 +163,70 @@ private final class SetupRunner: CommandRunning {
             try expect(empty.setupItems.allSatisfy { $0.phase == .notRequired } && empty.lastScan != nil, "An empty inventory did not finish without setup")
             try expect(empty.sources.allSatisfy { $0.checkRequired == false } && !empty.sourceChecksNeedAttention, "An unnecessary source appeared as missing or failed")
             print("PASS Empty inventories do not trigger source preparation")
+
             let optionalRunner = SetupRunner()
             let optional = AppModel(runner: optionalRunner, sourcePaths: [:], setupLocate: { $0 == "port" ? nil : paths[$0] })
             optional.preferences.scanRoots = [applications.appendingPathComponent("Direct.app").path]
             optional.preferences.includeSystemApplications = false
-            optional.prepareSources(); try await wait(optional)
-            try expect(optional.setupItems[2].phase == .notRequired && optionalRunner.macPortsInstallerRequests == 0, "Default preparation requested an unrelated MacPorts installer")
+            optional.installMissingSourceTools(); try await wait(optional)
+            try expect(optional.setupItems[2].phase == .notRequired && optionalRunner.macPortsInstallerRequests == 0, "Default install missing requested an unrelated MacPorts installer")
             optional.includeMacPortsInPreparation = true
-            optional.prepareSources(); try await wait(optional)
-            try expect(optional.setupItems[2].phase == .failed && optionalRunner.macPortsInstallerRequests == 1, "Sources opt-in was not forwarded to preparation")
+            optional.installMissingSourceTools(); try await wait(optional)
+            try expect(optional.setupItems[2].phase == .failed && optionalRunner.macPortsInstallerRequests == 1, "Sources opt-in was not forwarded to install missing")
             optional.includeMacPortsInPreparation = false
-            optional.prepareSources(); try await wait(optional)
+            optional.installMissingSourceTools(); try await wait(optional)
             try expect(optional.setupItems[2].phase == .notRequired && optionalRunner.macPortsInstallerRequests == 1, "Removing optional opt-in kept retrying its installer")
-            print("PASS Optional MacPorts preparation requires the Sources opt-in")
+            print("PASS Optional MacPorts installation requires the Sources opt-in")
+
             let storeOnly = session()
             storeOnly.preferences.scanRoots = [applications.appendingPathComponent("Store.app").path]
             let beforeStore = runner.actions.count
-            storeOnly.prepareSources(); try await wait(storeOnly)
-            try expect(Array(runner.actions.dropFirst(beforeStore)) == ["brew-update", "mas-update"], "Store-only inventory prepared unrelated managers")
+            storeOnly.upgradeSourceTools(); try await wait(storeOnly)
+            try expect(Array(runner.actions.dropFirst(beforeStore)) == ["brew-update", "mas-update"], "Store-only inventory upgraded unrelated managers")
             try expect(storeOnly.setupItems[1].dependencyFor == .appStore && storeOnly.setupItems[2].phase == .notRequired, "Store helper dependency was not distinguished")
-            print("PASS Store-only inventory prepares only its helper route")
+            print("PASS Store-only inventory upgrades only its helper route")
+
             let directOnly = session()
             directOnly.preferences.scanRoots = [applications.appendingPathComponent("Direct.app").path]
             let beforeDirect = runner.actions.count
-            directOnly.prepareSources(); try await wait(directOnly)
-            try expect(Array(runner.actions.dropFirst(beforeDirect)) == ["brew-update", "ports-update"] && directOnly.setupItems[3].phase == .notRequired, "Non-store inventory prepared mas")
+            directOnly.upgradeSourceTools(); try await wait(directOnly)
+            try expect(Array(runner.actions.dropFirst(beforeDirect)) == ["brew-update", "ports-update"] && directOnly.setupItems[3].phase == .notRequired, "Non-store inventory upgraded mas")
             print("PASS Non-store inventory skips the App Store helper")
             directOnly.sources = [SourceHealth(source: .appStore, message: "Not needed", checkRequired: false)]
             directOnly.invalidateInventory()
             try expect(directOnly.sources[0].checkRequired == nil && directOnly.sourceChecksNeedAttention && directOnly.lastScan == nil, "Changed scan settings retained a stale unnecessary-source decision")
             print("PASS Changed scan settings invalidate skipped source checks")
+
             runner.failPorts = true
             let changedHelper = session()
-            changedHelper.prepareSources(); try await wait(changedHelper)
+            changedHelper.upgradeSourceTools(); try await wait(changedHelper)
             runner.failPorts = false; runner.masVersion = "6.0.0"
             let beforeHelperRetry = runner.actions.count
-            changedHelper.prepareSources(); try await wait(changedHelper)
+            changedHelper.upgradeSourceTools(); try await wait(changedHelper)
             try expect(changedHelper.setupItems[3].phase == .failed && changedHelper.setupNeedsAttention, "GUI reused an incompatible helper's ready result")
             try expect(changedHelper.setupItems[3].message.contains("mas 7 or later") && Array(runner.actions.dropFirst(beforeHelperRetry)) == ["ports-update", "mas-update"], "GUI did not repair the stale helper independently")
-            print("PASS GUI retry invalidates a previously ready incompatible helper")
+            print("PASS GUI upgrade retry invalidates a previously ready incompatible helper")
             runner.masVersion = "7.1.0"
             let beforeRecovery = runner.actions.count
-            changedHelper.prepareSources(); try await wait(changedHelper)
+            changedHelper.upgradeSourceTools(); try await wait(changedHelper)
             try expect(!changedHelper.setupNeedsAttention && changedHelper.setupItems[3].version == "7.1.0", "GUI retained stale readiness after helper recovery")
             try expect(Array(runner.actions.dropFirst(beforeRecovery)) == ["mas-update"] && changedHelper.lastScan != nil, "Helper recovery repeated successful manager maintenance")
             print("PASS GUI helper recovery clears attention without repeating healthy managers")
+
+            let upgradeMissing = AppModel(runner: SetupRunner(), setupLocate: { $0 == "brew" ? nil : paths[$0] })
+            upgradeMissing.preferences.scanRoots = [applications.appendingPathComponent("Direct.app").path]
+            upgradeMissing.preferences.includeSystemApplications = false
+            upgradeMissing.upgradeSourceTools(); try await wait(upgradeMissing)
+            try expect(upgradeMissing.setupItems[1].phase == .failed && upgradeMissing.setupItems[1].message.contains("not installed"), "Upgrade installed a missing manager")
+            print("PASS Upgrade Source Tools does not install missing managers")
+
             let metadataRunner = SetupRunner(); metadataRunner.failMetadataPorts = true
             let metadata = AppModel(runner: metadataRunner, sourcePaths: [.homebrew: paths["brew"]!, .appStore: paths["mas"]!], setupLocate: { paths[$0] })
             metadata.preferences.scanRoots = [applications.path]; metadata.preferences.includeSystemApplications = false
             metadata.refreshSourceMetadata()
             try expect(metadata.refreshingMetadata && metadata.busy && metadata.preventsQuit && !metadata.maintainingSources, "Metadata intent was not independently active")
             try await wait(metadata)
-            try expect(!metadata.preventsQuit && !metadata.setupWasPrepared && metadata.setupActionTitle == "Prepare Sources", "Metadata refresh was counted as tool preparation")
-            try expect(metadata.metadataRefreshItems[0].phase == .ready && metadata.metadataRefreshItems[1].phase == .failed && metadata.metadataNeedsAttention, "Partial metadata failure was lost")
+            try expect(!metadata.preventsQuit && metadata.setupAction == nil && metadata.metadataRefreshItems[0].phase == .ready && metadata.metadataRefreshItems[1].phase == .failed && metadata.metadataNeedsAttention, "Metadata refresh was counted as tool preparation")
             try expect(metadata.lastMetadataRefreshAttempt != nil && metadata.lastScan != nil && metadataRunner.metadataBrewRequests == 1, "Metadata results or following app scan were missing")
             try expect(metadataRunner.actions == ["ports-sync"], "Metadata-only intent broadened into tool maintenance")
             metadataRunner.failMetadataPorts = false
@@ -207,7 +234,7 @@ private final class SetupRunner: CommandRunning {
             try expect(!metadata.metadataNeedsAttention && metadata.metadataRefreshItems[1].phase == .ready && metadataRunner.metadataBrewRequests == 2, "Metadata retry retained stale failures")
             try expect(metadataRunner.actions == ["ports-sync", "ports-sync"] && metadata.setupItems.allSatisfy { $0.phase == .waiting }, "Metadata refresh overwrote independent preparation evidence")
             print("PASS Metadata scope, partial failure and retry remain independent from tool preparation")
-            print("\n17 setup orchestration checks passed; 0 failed.")
+            print("\n20 setup orchestration checks passed; 0 failed.")
         } catch {
             FileHandle.standardError.write(Data("FAIL \(error)\n".utf8)); exit(1)
         }

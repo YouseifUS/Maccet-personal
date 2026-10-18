@@ -292,7 +292,7 @@ Use green for confirmed removal, neutral for deliberately retained files, and am
 
 **Header:** “Sources” / “Know where every update comes from.”
 
-The page begins with a setup summary: latest preparation state and **Retry Setup** or **Prepare Sources Again**. The expanded summary uses the same step component as the startup screen.
+The source-tools card offers two explicit actions: **Install Missing Tools** adds missing tools without upgrading installed ones; **Upgrade Source Tools** updates installed tools and refreshes the local metadata those commands own, without upgrading applications. Show separate retry labels after a failure and preserve the per-step results in the expandable summary below.
 
 Below it, use three full-width source cards in a vertical stack: **Homebrew**, **MacPorts**, and **App Store via mas**. A card contains:
 
@@ -342,9 +342,9 @@ Use a single surface containing the actual setup sequence:
 
 Rows use a pending circle, an indeterminate spinner, a green check, or a red failure symbol, plus text. Keep a failed row visible while independent steps continue. There is no fake “80% complete” bar and no “Skip setup” action that bypasses an active installer.
 
-Bottom copy: **“macOS may ask for administrator permission. Keep Maccet open until installers finish.”** Technical details sit in a disclosure. Apple tool installation and Intel Homebrew limitations explain the concrete next step, followed by **Retry Setup** when setup has stopped.
+Bottom copy: **“macOS may ask for administrator permission. Keep Maccet open until installers finish.”** Technical details sit in a disclosure. Apple tool installation and Intel Homebrew limitations explain the concrete next step, followed by a retry of the chosen action when setup has stopped.
 
-After setup ends, proceed into the automatic scan. If some sources failed, show available results and a persistent **Some update sources need attention** banner with **View Sources** and **Retry Setup**. The banner must not cover content or present failed setup as a completed app update.
+After setup ends, proceed into the automatic scan. If some sources failed, show available results and a persistent **Some update sources need attention** banner with **View Sources**. The Sources page offers retries for **Install Missing Tools** and **Upgrade Source Tools**. The banner must not cover content or present failed setup as a completed app update.
 
 ## 8. Sheets and secondary windows
 

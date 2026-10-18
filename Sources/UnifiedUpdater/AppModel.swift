@@ -19,6 +19,10 @@ enum Screen: String, CaseIterable, Identifiable {
     }
 }
 
+enum SourceSetupAction {
+    case readiness, installMissing, upgradeTools
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var screen: Screen? = .updates
@@ -34,7 +38,7 @@ final class AppModel: ObservableObject {
     @Published var lastScan: Date?
     @Published var settingUp = false
     @Published private(set) var maintainingSources = false
-    @Published private(set) var setupWasPrepared = false
+    @Published private(set) var setupAction: SourceSetupAction?
     @Published var setupItems = DependencySetup.initialItems
     @Published var includeMacPortsInPreparation = false
     @Published var refreshingMetadata = false
@@ -72,7 +76,8 @@ final class AppModel: ObservableObject {
     var busy: Bool { settingUp || refreshingMetadata || refreshingDiscoveryCatalog || scanning || preparing || updating || verifyingVendorResult || verifyingAssistedResult }
     var preventsQuit: Bool { updating || maintainingSources || refreshingMetadata }
     var setupNeedsAttention: Bool { setupItems.contains { $0.phase.needsAttention } }
-    var setupActionTitle: String { setupWasPrepared ? (setupNeedsAttention ? "Retry Setup" : "Prepare Sources Again") : "Prepare Sources" }
+    var installMissingTitle: String { setupAction == .installMissing && setupNeedsAttention ? "Retry Install Missing Tools" : "Install Missing Tools" }
+    var upgradeToolsTitle: String { setupAction == .upgradeTools && setupNeedsAttention ? "Retry Upgrade Source Tools" : "Upgrade Source Tools" }
     var metadataNeedsAttention: Bool {
         metadataRefreshItems.contains { item in
             item.phase.needsAttention && UpdateSource.allCases.contains { $0.toolName == item.id && !preferences.disabledSources.contains($0) }
@@ -130,11 +135,15 @@ final class AppModel: ObservableObject {
     func start() {
         guard !startupStarted else { return }
         startupStarted = true
-        runSourceSetup(prepareTools: false)
+        runSourceSetup(action: .readiness)
     }
 
-    func prepareSources() {
-        runSourceSetup(prepareTools: true)
+    func installMissingSourceTools() {
+        runSourceSetup(action: .installMissing)
+    }
+
+    func upgradeSourceTools() {
+        runSourceSetup(action: .upgradeTools)
     }
 
     func configureDiscoveryCatalog(_ configuration: DiscoveryCatalogConfiguration?) throws {
@@ -200,15 +209,22 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func runSourceSetup(prepareTools: Bool) {
+    private func runSourceSetup(action: SourceSetupAction) {
         guard !busy else { return }
-        let previousItems = prepareTools && setupWasPrepared && setupNeedsAttention ? setupItems : nil
+        let previousItems = (self.setupAction == action && setupNeedsAttention) ? setupItems : nil
         let prefs = preferences
         let includeMacPorts = includeMacPortsInPreparation
-        maintainingSources = prepareTools; setupWasPrepared = prepareTools
+        self.setupAction = action
+        maintainingSources = (action != .readiness)
         settingUp = true; setupItems = previousItems ?? DependencySetup.initialItems
         apps = []; selected = []; lastScan = nil
-        status = prepareTools ? "Reading applications before source preparation…" : "Reading applications before source readiness checks…"
+        status = {
+            switch action {
+            case .readiness: return "Reading applications before source readiness checks…"
+            case .installMissing: return "Reading applications before installing missing source tools…"
+            case .upgradeTools: return "Reading applications before upgrading source tools…"
+            }
+        }()
         Task { [self] in
             let inventory = await Task.detached {
                 AppInventory().discover(roots: prefs.inventoryRoots, includeSystem: prefs.includeSystemApplications ?? true)
@@ -221,10 +237,13 @@ final class AppModel: ObservableObject {
                 }
             }
             let setup = DependencySetup(runner: runner, locate: setupLocate)
-            if prepareTools {
-                setupItems = await setup.prepare(inventory: inventory, disabledSources: prefs.disabledSources, includeMacPorts: includeMacPorts, retrying: previousItems, progress: progress)
-            } else {
+            switch action {
+            case .readiness:
                 setupItems = await setup.checkReadiness(inventory: inventory, disabledSources: prefs.disabledSources, progress: progress)
+            case .installMissing:
+                setupItems = await setup.installMissingTools(inventory: inventory, disabledSources: prefs.disabledSources, includeMacPorts: includeMacPorts, retrying: previousItems, progress: progress)
+            case .upgradeTools:
+                setupItems = await setup.upgradeSourceTools(inventory: inventory, disabledSources: prefs.disabledSources, includeMacPorts: includeMacPorts, retrying: previousItems, progress: progress)
             }
             settingUp = false; maintainingSources = false
             // A canceled authorization or offline source must not hide usable sources.

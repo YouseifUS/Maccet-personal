@@ -26,7 +26,7 @@ A working App Store helper is checked directly during launch; its package manage
 
 Choose **Sources → Refresh Metadata** to request package data with installed tools and then rescan applications. Homebrew uses API refresh flags with Git/tool auto-update disabled; MacPorts uses `port sync`. Results and last-attempt time are separate from tool-preparation results. Homebrew can reuse verified cached data when upstream is unavailable, so a completed request is not a freshness guarantee; Git-tap-only mode reports an unsupported request instead of broadening into tool maintenance.
 
-Choose **Sources → Prepare Sources** to install missing tools and maintain required sources. Partial preparation failures offer **Retry Setup**, while available sources can still check apps. See [source readiness and preparation](docs/STARTUP_SETUP.md) for prerequisites, authorization, and platform limitations.
+Choose **Sources → Install Missing Tools** to add only missing source tools without upgrading installed ones, or **Sources → Upgrade Source Tools** to update installed Homebrew, MacPorts and mas (which also refreshes their local metadata). Partial failures offer a retry for the same action, while available sources can still check apps. Application updates remain in their reviewed update flow. See [source readiness and preparation](docs/STARTUP_SETUP.md) for prerequisites, authorization, and platform limitations.
 
 Installing a manager does not make it the owner of existing direct-download applications. Coverage still depends on verified ownership; a missing or failed source cannot claim complete coverage.
 
@@ -66,13 +66,13 @@ MacPorts is optional. Preparation uses an existing manager, known MacPorts owner
 
 A working App Store helper is checked directly during launch; its package manager and Apple developer tools are required only when the chosen maintenance action needs them. Missing or broken helpers still require attention.
 
-Choose **Sources → Prepare Sources** to install and update these dependencies. Fresh automatic Homebrew installation currently requires Apple Silicon; Intel users must install Homebrew once using its official instructions. During explicit preparation, missing Apple developer tools open Apple's system installer; finish that installer and choose **Retry Setup**. Installer availability and upstream OS support can further limit setup on older macOS versions. Inventory and available sources remain usable if setup fails. Official instructions: [Homebrew](https://docs.brew.sh/Installation), [MacPorts](https://www.macports.org/install.php), and [mas](https://github.com/mas-cli/mas).
+Choose **Sources → Install Missing Tools** to add missing source tools, or **Sources → Upgrade Source Tools** to update installed ones. Fresh automatic Homebrew installation currently requires Apple Silicon; Intel users must install Homebrew once using its official instructions. During installation, missing Apple developer tools open Apple's system installer; finish that installer and retry the same action. Installer availability and upstream OS support can further limit setup on older macOS versions. Inventory and available sources remain usable if setup fails. Official instructions: [Homebrew](https://docs.brew.sh/Installation), [MacPorts](https://www.macports.org/install.php), and [mas](https://github.com/mas-cli/mas).
 
 ## Run the app
 
 Build with the script below, then open `dist/Maccet.app`. The included binary archive is built for the architecture stated in its filename.
 
-1. Wait for source readiness checks and the initial application scan. Open **Sources** to inspect results. Choose **Prepare Sources** when tools need installation or maintenance, complete any macOS authorization, and use **Retry Setup** after a preparation failure.
+1. Wait for source readiness checks and the initial application scan. Open **Sources** to inspect results. Choose **Install Missing Tools** when a source tool is missing, or **Upgrade Source Tools** to update installed tools and refresh their metadata. Complete any macOS authorization, and retry the same action after a failure.
 2. Review application folders in **Settings**.
 3. Click **Check for Updates**.
 4. Inspect coverage and select **Review Update**, **Update Selected**, or **Update All**.
@@ -80,7 +80,7 @@ Build with the script below, then open `dist/Maccet.app`. The included binary ar
 6. Save your work, close the applications, and choose **Start Updates**. Optionally request a normal quit for running apps.
 7. Inspect **Activity** and **Cleanup** for results.
 
-Explicit source preparation installs or updates the source tools themselves, including `mas` and required tool dependencies. Updates to applications in your inventory require your reviewed update plan. Launch readiness checks, diagnostic commands, and scans do not run source maintenance. Update All uses an explicit list of eligible apps, regardless of search filters; the App Store screen restricts its Update All action to store apps. Authentication can be canceled in the system dialog.
+Explicit source preparation is split into **Install Missing Tools** and **Upgrade Source Tools**. Neither action upgrades applications in your inventory; those remain in their reviewed update plan. Launch readiness checks, diagnostic commands, and scans do not run source maintenance. Update All uses an explicit list of eligible apps, regardless of search filters; the App Store screen restricts its Update All action to store apps. Authentication can be canceled in the system dialog.
 
 ## Screens
 
@@ -136,7 +136,7 @@ Shared Homebrew caches, general app caches, user preferences, licenses, and docu
 
 **Cancel Remaining** cancels queued work and prevents installation when cancellation arrives before the install stage. An active installation is allowed to finish safely; it is not forcibly terminated. Independent failures do not stop the rest of a valid queue. macOS may show an authorization dialog for each store update.
 
-MacPorts checks use the existing local ports index; the UI labels that limitation. **Refresh Metadata** runs `port -N sync` for index data; **Prepare Sources** runs `port -N selfupdate`, which can also update MacPorts itself, with macOS authorization before rescanning. Launch and diagnostic scans use the existing local index. An update preview uses `port -y -N upgrade <name>`; the reviewed installation uses one named package and may update required dependencies shown in the preview. macOS authorization is requested for the standard root-owned installation. Shared MacPorts caches and inactive versions are retained. Revision-only and incomparable vendor changes require manual verification.
+MacPorts checks use the existing local ports index; the UI labels that limitation. **Refresh Metadata** runs `port -N sync` for index data; **Upgrade Source Tools** runs `port -N selfupdate`, which also refreshes the port definitions and may update MacPorts itself, with macOS authorization before rescanning. Launch and diagnostic scans use the existing local index. An update preview uses `port -y -N upgrade <name>`; the reviewed installation uses one named package and may update required dependencies shown in the preview. macOS authorization is requested for the standard root-owned installation. Shared MacPorts caches and inactive versions are retained. Revision-only and incomparable vendor changes require manual verification.
 
 ## Build from source
 
